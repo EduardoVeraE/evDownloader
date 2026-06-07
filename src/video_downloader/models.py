@@ -51,19 +51,33 @@ class Subtitle(BaseModel):
     url: str
 
 
+class Cookie(BaseModel):
+    """Cookie completa (campos necesarios para un cookiefile Netscape)."""
+
+    name: str
+    value: str
+    domain: str = ""
+    path: str = "/"
+    secure: bool = False
+    # Epoch en segundos; <= 0 indica cookie de sesión (sin expiración fija).
+    expires: float = 0.0
+
+
 class VideoSource(BaseModel):
     """Fuente de video resuelta, lista para entregar a un downloader.
 
     ``url`` puede ser el embed de Mediastream (``https://mdstrm.com/embed/{id}``)
     o directamente el master playlist ``.m3u8``. ``http_headers`` lleva los
-    encabezados coherentes (User-Agent, Referer) y ``cookies`` el estado de
-    sesión necesario para que la descarga no reciba 403.
+    encabezados coherentes (User-Agent, Referer); ``cookies`` el estado de sesión
+    como ``name -> value`` (para construir el header ``Cookie`` en rnet/FFmpeg) y
+    ``cookie_jar`` las cookies completas (para generar un cookiefile en yt-dlp).
     """
 
     url: str
     is_embed: bool = False
     http_headers: dict[str, str] = Field(default_factory=dict)
     cookies: dict[str, str] = Field(default_factory=dict)
+    cookie_jar: list[Cookie] = Field(default_factory=list)
     subtitles: list[Subtitle] = Field(default_factory=list)
 
 
