@@ -55,6 +55,7 @@ class Settings:
     headless: bool = True
     concurrency: int = 8
     limit: int | None = None  # nº máximo de clases de video a descargar (None = todas)
+    resources: bool = True  # descargar resumen, archivos adjuntos, enlaces y MHTML
 
 
 def ensure_dirs() -> None:

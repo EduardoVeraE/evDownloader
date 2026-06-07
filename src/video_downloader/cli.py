@@ -58,6 +58,9 @@ def download(
     no_cache: bool = typer.Option(
         False, "--no-cache", help="Ignorar la caché de estructura del curso."
     ),
+    no_resources: bool = typer.Option(
+        False, "--no-resources", help="No descargar resumen, adjuntos, enlaces ni MHTML."
+    ),
     show_browser: bool = typer.Option(
         False, "--show-browser", help="Mostrar el navegador (no headless)."
     ),
@@ -73,6 +76,7 @@ def download(
         downloader=downloader,
         headless=not show_browser,
         limit=limit,
+        resources=not no_resources,
     )
     asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
 

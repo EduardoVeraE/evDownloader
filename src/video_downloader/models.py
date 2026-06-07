@@ -15,6 +15,35 @@ class UnitType(StrEnum):
     QUIZ = "quiz"
 
 
+class ResourceKind(StrEnum):
+    """Naturaleza de un recurso adjunto a una clase."""
+
+    FILE = "file"  # archivo descargable (alojado por la plataforma)
+    LINK = "link"  # enlace externo (lectura recomendada, herramienta, etc.)
+
+
+class Resource(BaseModel):
+    """Recurso adjunto a una clase: archivo descargable o enlace externo."""
+
+    title: str
+    url: str
+    kind: ResourceKind = ResourceKind.LINK
+
+
+class UnitExtras(BaseModel):
+    """Material complementario de una clase, resuelto al visitar su página.
+
+    Se mantiene fuera de :class:`Unit` (y, por tanto, de la caché de estructura)
+    porque ``page_mhtml`` puede ser voluminoso y el resumen/recursos se vuelven a
+    leer en cada descarga.
+    """
+
+    summary_html: str | None = None
+    resources: list[Resource] = Field(default_factory=list)
+    # Snapshot MHTML de la página (se captura para lectures/quizzes sin video).
+    page_mhtml: str | None = None
+
+
 class Subtitle(BaseModel):
     """Pista de subtítulos asociada a un video."""
 

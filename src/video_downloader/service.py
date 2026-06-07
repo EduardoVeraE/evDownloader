@@ -7,6 +7,7 @@ motor de descarga elegido, y organiza la salida en carpetas jerárquicas.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import aiofiles
 import rnet
@@ -16,7 +17,7 @@ from . import browser, cache
 from .config import RNET_IMPERSONATE, Settings
 from .downloaders import get_downloader
 from .extractors import get_extractor
-from .models import Course, Subtitle, Unit, UnitType
+from .models import Course, Resource, ResourceKind, Subtitle, Unit, UnitExtras, UnitType
 from .utils import numbered, safe_mkdir, slugify
 
 console = Console()
@@ -68,11 +69,18 @@ async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Cours
 async def _process_unit(
     extractor, downloader, ctx, unit: Unit, out_dir: Path, settings: Settings
 ) -> None:
-    if unit.type != UnitType.VIDEO:
-        console.print(f"[dim]Omitiendo {unit.type.value}: {unit.title}[/dim]")
-        return
-
     base = out_dir / numbered(unit.index, unit.title)
+    if unit.type == UnitType.VIDEO:
+        await _download_video(extractor, downloader, ctx, unit, base, settings)
+    else:
+        console.print(f"[dim]{unit.type.value}: {unit.title}[/dim]")
+    if settings.resources:
+        await _save_extras(extractor, ctx, unit, base, settings)
+
+
+async def _download_video(
+    extractor, downloader, ctx, unit: Unit, base: Path, settings: Settings
+) -> None:
     final = base.with_suffix(".mp4")
     if final.exists() and not settings.overwrite:
         console.print(f"[dim]Ya existe: {final.name}[/dim]")
@@ -94,6 +102,35 @@ async def _process_unit(
     await _save_subtitles(source.subtitles, base, source)
 
 
+async def _save_extras(
+    extractor, ctx, unit: Unit, base: Path, settings: Settings
+) -> None:
+    """Guarda resumen, archivos adjuntos, enlaces y, si aplica, el MHTML."""
+    # Para lectures/quizzes (sin video) capturamos la página completa como MHTML.
+    capture = unit.type is not UnitType.VIDEO
+    extras: UnitExtras = await extractor.resolve_extras(ctx, unit, capture_page=capture)
+
+    if extras.summary_html:
+        await _write_text(
+            base.with_suffix(".resumen.html"), _wrap_html(unit.title, extras.summary_html)
+        )
+
+    if extras.page_mhtml:
+        await _write_text(base.with_suffix(".mhtml"), extras.page_mhtml)
+
+    files = [r for r in extras.resources if r.kind is ResourceKind.FILE]
+    links = [r for r in extras.resources if r.kind is ResourceKind.LINK]
+
+    if links:
+        body = "\n".join(f"- [{lk.title}]({lk.url})" for lk in links)
+        await _write_text(base.with_suffix(".enlaces.md"), f"# Enlaces — {unit.title}\n\n{body}\n")
+
+    if files:
+        cookies = browser.cookies_as_dict(await ctx.cookies())
+        res_dir = safe_mkdir(base.parent / (base.name + "-recursos"))
+        await _download_files(files, res_dir, cookies)
+
+
 async def _save_subtitles(subtitles: list[Subtitle], base: Path, source) -> None:
     if not subtitles:
         return
@@ -110,3 +147,48 @@ async def _save_subtitles(subtitles: list[Subtitle], base: Path, source) -> None
                 await f.write(content)
         except Exception:  # noqa: BLE001, S112
             continue
+
+
+async def _download_files(
+    files: list[Resource], out_dir: Path, cookies: dict[str, str]
+) -> None:
+    """Descarga los archivos adjuntos a ``out_dir`` con la sesión activa."""
+    client = rnet.Client(impersonate=getattr(rnet.Impersonate, RNET_IMPERSONATE, None))
+    headers: dict[str, str] = {}
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    for res in files:
+        name = _filename_from_url(res.url, res.title)
+        try:
+            resp = await client.get(res.url, headers=headers)
+            data = await resp.bytes()
+            async with aiofiles.open(out_dir / name, "wb") as f:
+                await f.write(data)
+            console.print(f"  [green]·[/green] recurso: {name}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]·[/red] falló recurso {name}: {exc}")
+
+
+def _filename_from_url(url: str, title: str) -> str:
+    """Deriva un nombre de archivo seguro de la URL (o del título de respaldo)."""
+    path = unquote(urlsplit(url).path)
+    candidate = Path(path).name
+    if candidate and "." in candidate:
+        return slugify(candidate)
+    return slugify(title)
+
+
+async def _write_text(path: Path, content: str) -> None:
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(content)
+
+
+def _wrap_html(title: str, body_html: str) -> str:
+    """Envuelve el HTML del resumen en un documento mínimo autónomo."""
+    safe_title = title.replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n"
+        '<meta charset="utf-8">\n'
+        f"<title>{safe_title}</title>\n</head>\n<body>\n"
+        f"<h1>{safe_title}</h1>\n{body_html}\n</body>\n</html>\n"
+    )

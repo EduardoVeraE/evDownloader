@@ -21,7 +21,17 @@ from playwright.async_api import BrowserContext, Request
 
 from .. import browser
 from ..config import DEFAULT_USER_AGENT, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
-from ..models import Chapter, Course, Subtitle, Unit, UnitType, VideoSource
+from ..models import (
+    Chapter,
+    Course,
+    Resource,
+    ResourceKind,
+    Subtitle,
+    Unit,
+    UnitExtras,
+    UnitType,
+    VideoSource,
+)
 from .base import Extractor
 
 # Extrae el temario directamente del DOM renderizado. Cada capítulo es un
@@ -50,6 +60,29 @@ _SYLLABUS_JS = """() => {
   });
   return { title: courseTitle, chapters };
 }"""
+
+# Material complementario de una clase: el "Resumen" (lectura) y la sección
+# "Recursos" (FilesAndLinks). Clases verificadas en vivo (2026-06-07):
+# resumen = ``[class*='Resources_Resources__summary'] [class*='Markdown_Markdown']``;
+# recursos = ``[class*='FilesAndLinks'] a[class*='Item__link'][href]`` con título en
+# ``[class*='Item__title']``.
+_EXTRAS_JS = r"""() => {
+  let summaryHtml = null;
+  const sum = document.querySelector(
+    "[class*='Resources_Resources__summary'] [class*='Markdown_Markdown']"
+  );
+  if (sum) summaryHtml = sum.innerHTML;
+  const resources = [];
+  document.querySelectorAll("[class*='FilesAndLinks'] a[href]").forEach(a => {
+    const t = a.querySelector("[class*='Item__title']");
+    const title = (t ? t.textContent : a.textContent).trim();
+    if (a.href) resources.push({ title, url: a.href });
+  });
+  return { summaryHtml, resources };
+}"""
+
+# Dominios desde los que Platzi sirve archivos descargables propios.
+_PLATZI_FILE_HOSTS = ("static.platzi.com", "files.platzi.com")
 
 _MDSTRM_EMBED_RE = re.compile(r"https?://mdstrm\.com/embed/(\w+)")
 # .m3u8 que NO sea un playlist de subtítulos (.vtt.m3u8).
@@ -196,3 +229,57 @@ class PlatziExtractor(Extractor):
         except Exception:
             pass
         return found
+
+    # -- Material complementario (resumen, recursos, snapshot) ---------------
+    async def resolve_extras(
+        self, ctx: BrowserContext, unit: Unit, *, capture_page: bool = False
+    ) -> UnitExtras:
+        if not unit.url:
+            return UnitExtras()
+
+        page = await ctx.new_page()
+        try:
+            await page.goto(unit.url, wait_until="domcontentloaded")
+            # El panel de recursos se hidrata en cliente tras cargar el DOM, y la
+            # lista de archivos/enlaces (FilesAndLinks) aparece después del resumen.
+            with contextlib.suppress(Exception):
+                await page.wait_for_selector("[class*='Resources_Resources__']", timeout=10000)
+            # Esperar la lista de adjuntos si existe; el timeout corto cubre las
+            # clases que simplemente no tienen recursos.
+            with contextlib.suppress(Exception):
+                await page.wait_for_selector("[class*='FilesAndLinks']", timeout=4000)
+            raw = await page.evaluate(_EXTRAS_JS)
+
+            mhtml: str | None = None
+            if capture_page:
+                mhtml = await self._capture_mhtml(ctx, page)
+        finally:
+            await page.close()
+
+        resources = [
+            Resource(title=r.get("title") or "recurso", url=url, kind=self._resource_kind(url))
+            for r in raw.get("resources", [])
+            if (url := r.get("url"))
+        ]
+        return UnitExtras(
+            summary_html=raw.get("summaryHtml") or None,
+            resources=resources,
+            page_mhtml=mhtml,
+        )
+
+    @staticmethod
+    def _resource_kind(url: str) -> ResourceKind:
+        """Distingue un archivo alojado por Platzi de un enlace externo."""
+        if any(host in url for host in _PLATZI_FILE_HOSTS):
+            return ResourceKind.FILE
+        return ResourceKind.LINK
+
+    @staticmethod
+    async def _capture_mhtml(ctx: BrowserContext, page) -> str | None:
+        """Captura un snapshot MHTML de la página vía CDP (solo Chromium)."""
+        try:
+            client = await ctx.new_cdp_session(page)
+            result = await client.send("Page.captureSnapshot", {"format": "mhtml"})
+            return result.get("data")
+        except Exception:
+            return None
