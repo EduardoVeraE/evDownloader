@@ -1,0 +1,98 @@
+"""Interfaz de línea de comandos (Typer)."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import typer
+from rich.console import Console
+
+from . import cache, session
+from .config import Settings, ensure_dirs
+
+app = typer.Typer(
+    name="video-downloader",
+    help="Descargador de cursos de video (foco inicial en Platzi).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+console = Console()
+
+
+@app.command()
+def login() -> None:
+    """Inicia sesión en Platzi (abre el navegador para login manual)."""
+    ensure_dirs()
+    ok = asyncio.run(session.login())
+    raise typer.Exit(code=0 if ok else 1)
+
+
+@app.command()
+def logout() -> None:
+    """Cierra la sesión eliminando las cookies guardadas."""
+    if session.logout():
+        console.print("[green]Sesión cerrada.[/green]")
+    else:
+        console.print("[yellow]No había una sesión activa.[/yellow]")
+
+
+@app.command()
+def download(
+    url: str = typer.Argument(..., help="URL del curso a descargar."),
+    quality: str | None = typer.Option(
+        None, "-q", "--quality", help="Calidad máxima: 1080, 720... (def: máxima)."
+    ),
+    output: Path = typer.Option(
+        Path.cwd() / "Courses", "-o", "--output", help="Directorio de salida."
+    ),
+    downloader: str = typer.Option(
+        "ytdlp", "-d", "--downloader", help="Motor: ytdlp (def) o native."
+    ),
+    overwrite: bool = typer.Option(
+        False, "-w", "--overwrite", help="Sobrescribir archivos existentes."
+    ),
+    limit: int | None = typer.Option(
+        None, "-n", "--limit", help="Descargar solo las primeras N clases de video."
+    ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Ignorar la caché de estructura del curso."
+    ),
+    show_browser: bool = typer.Option(
+        False, "--show-browser", help="Mostrar el navegador (no headless)."
+    ),
+) -> None:
+    """Descarga un curso completo."""
+    ensure_dirs()
+    from . import service  # import diferido (carga Playwright/yt-dlp)
+
+    settings = Settings(
+        download_dir=output,
+        quality=quality,
+        overwrite=overwrite,
+        downloader=downloader,
+        headless=not show_browser,
+        limit=limit,
+    )
+    asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
+
+
+@app.command("clear-cache")
+def clear_cache() -> None:
+    """Borra la caché de estructura de cursos."""
+    n = cache.clear()
+    console.print(f"[green]Caché borrada ({n} archivos).[/green]")
+
+
+@app.command()
+def status() -> None:
+    """Muestra si hay una sesión activa."""
+    logged = asyncio.run(session.is_logged_in())
+    if logged:
+        console.print("[green]Sesión activa.[/green]")
+    else:
+        console.print("[yellow]Sin sesión. Ejecuta 'video-downloader login'.[/yellow]")
+
+
+if __name__ == "__main__":
+    app()

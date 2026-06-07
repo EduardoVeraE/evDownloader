@@ -1,0 +1,60 @@
+[project]
+name = "video-downloader"
+version = "0.1.0"
+description = "Descargador de cursos de video (foco inicial en Platzi) con extracción por interceptación de red y motor híbrido yt-dlp / nativo."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "eduardo", email = "eduvera@gmail.com" }]
+keywords = ["platzi", "downloader", "hls", "m3u8", "mediastream", "yt-dlp"]
+
+dependencies = [
+    "typer>=0.15.0",
+    "pydantic>=2.12.0",
+    "playwright>=1.60.0",
+    "yt-dlp>=2026.1.1",
+    "rnet>=2.4.2",
+    "aiofiles>=24.1.0",
+    "tqdm>=4.67.0",
+    "platformdirs>=4.3.6",
+    "unidecode>=1.3.8",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.14.0",
+    "mypy>=1.13.0",
+    "types-aiofiles>=24.1.0",
+]
+
+[project.scripts]
+video-downloader = "video_downloader.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_downloader"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer requiere llamadas (typer.Option/Argument) en los valores por defecto.
+"src/video_downloader/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
