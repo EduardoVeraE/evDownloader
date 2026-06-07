@@ -54,7 +54,12 @@ _SYLLABUS_JS = """() => {
         const c = a.querySelector("[class*='Content'], [class*='Title']");
         title = (c ? c.textContent : a.textContent).trim();
       }
-      units.push({ href, title });
+      // Señales para clasificar el tipo SIN navegar a la clase: las clases de
+      // video llevan miniatura de Mediastream y un badge de duración.
+      const thumb = img ? (img.getAttribute('src') || '') : '';
+      const dur = a.querySelector("[class*='ItemDetails__Duration'], [class*='Duration']");
+      const duration = dur ? dur.textContent.trim() : '';
+      units.push({ href, title, thumb, duration });
     });
     if (units.length) chapters.push({ title: chTitle, units });
   });
@@ -132,7 +137,9 @@ class PlatziExtractor(Extractor):
                     Unit(
                         title=(u.get("title") or f"Clase {unit_index}").strip(),
                         url=href,
-                        type=self._guess_type(href),
+                        type=self._classify_unit(
+                            href, u.get("thumb", ""), u.get("duration", "")
+                        ),
                         index=unit_index,
                     )
                 )
@@ -147,11 +154,19 @@ class PlatziExtractor(Extractor):
         return Course(title=title, url=url, chapters=chapters)
 
     @staticmethod
-    def _guess_type(href: str) -> UnitType:
+    def _classify_unit(href: str, thumb: str, duration: str) -> UnitType:
+        """Clasifica una unidad a partir de señales del temario, sin navegarla.
+
+        Evita abrir clases sin video: una clase de video se delata por su
+        miniatura de Mediastream o por el badge de duración del temario; los
+        quizzes por la URL; el resto se trata como lectura (``LECTURE``).
+        """
         low = href.lower()
         if "/quiz/" in low or "/examen" in low or "/test/" in low:
             return UnitType.QUIZ
-        return UnitType.VIDEO
+        if (thumb and any(host in thumb for host in MEDIASTREAM_HOSTS)) or duration:
+            return UnitType.VIDEO
+        return UnitType.LECTURE
 
     # -- Resolución de la fuente de video -----------------------------------
     async def resolve_video(self, ctx: BrowserContext, unit: Unit) -> VideoSource | None:

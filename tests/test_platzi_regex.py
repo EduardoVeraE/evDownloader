@@ -10,7 +10,27 @@ from video_downloader.extractors.platzi import (
     _M3U8_RE,
     _MDSTRM_EMBED_RE,
     _VTT_RE,
+    PlatziExtractor,
 )
+from video_downloader.models import UnitType
+
+
+def test_clasifica_video_por_miniatura_mdstrm() -> None:
+    thumb = "https://thumbs.cdn.mdstrm.com/thumbs/abc/thumb_x_9s.jpg"
+    assert PlatziExtractor._classify_unit("/cursos/x/clase/", thumb, "") is UnitType.VIDEO
+
+
+def test_clasifica_video_por_duracion_sin_miniatura() -> None:
+    # Si la miniatura no cargó pero hay badge de duración, sigue siendo video.
+    assert PlatziExtractor._classify_unit("/cursos/x/clase/", "", "08:15 min") is UnitType.VIDEO
+
+
+def test_clasifica_quiz_por_url() -> None:
+    assert PlatziExtractor._classify_unit("/cursos/x/quiz/123/", "", "") is UnitType.QUIZ
+
+
+def test_clasifica_lecture_sin_miniatura_ni_duracion() -> None:
+    assert PlatziExtractor._classify_unit("/cursos/x/lectura/", "", "") is UnitType.LECTURE
 
 
 def test_m3u8_ignora_subtitulos_vtt_m3u8() -> None:
