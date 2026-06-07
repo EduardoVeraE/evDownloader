@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Proyecto
+Courses/
+*.mp4
+*.vtt
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
