@@ -14,6 +14,7 @@ from typing import Any, cast
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from .config import DEFAULT_USER_AGENT, SESSION_FILE, ensure_dirs
+from .models import Cookie
 
 
 def load_cookies() -> list[dict[str, Any]]:
@@ -47,6 +48,25 @@ def clear_session() -> bool:
 def cookies_as_dict(cookies: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Convierte cookies de Playwright en un dict ``name -> value``."""
     return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
+
+
+def cookies_as_records(cookies: Sequence[Mapping[str, Any]]) -> list[Cookie]:
+    """Convierte cookies de Playwright en ``Cookie`` completos (para cookiefile)."""
+    records: list[Cookie] = []
+    for c in cookies:
+        if "name" not in c or "value" not in c:
+            continue
+        records.append(
+            Cookie(
+                name=c["name"],
+                value=c["value"],
+                domain=c.get("domain", ""),
+                path=c.get("path", "/"),
+                secure=bool(c.get("secure", False)),
+                expires=float(c.get("expires", 0) or 0),
+            )
+        )
+    return records
 
 
 @asynccontextmanager
