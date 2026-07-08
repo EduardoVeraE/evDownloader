@@ -6,6 +6,7 @@ motor de descarga elegido, y organiza la salida en carpetas jerárquicas.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -21,6 +22,10 @@ from .models import Course, Resource, ResourceKind, Subtitle, Unit, UnitExtras, 
 from .utils import numbered, safe_mkdir, slugify
 
 console = Console()
+
+# Extensión "limpia" al final de un nombre (p. ej. ".pdf", ".rar"): distingue un
+# título que ya es un nombre de archivo de uno descriptivo con puntos.
+_CLEAN_EXT_RE = re.compile(r"^\.[a-zA-Z0-9]{1,5}$")
 
 
 async def download_course(url: str, settings: Settings, *, use_cache: bool = True) -> None:
@@ -139,7 +144,8 @@ async def _save_extras(
         await _write_text(base.with_suffix(".enlaces.md"), f"# Enlaces — {unit.title}\n\n{body}\n")
 
     if files:
-        cookies = browser.cookies_as_dict(await ctx.cookies())
+        # Udemy no abre navegador (ctx=None); sus URLs de recurso vienen firmadas.
+        cookies = browser.cookies_as_dict(await ctx.cookies()) if ctx is not None else {}
         res_dir = safe_mkdir(base.parent / (base.name + "-recursos"))
         await _download_files(files, res_dir, cookies)
 
@@ -184,6 +190,11 @@ async def _download_files(
 
 def _filename_from_url(url: str, title: str) -> str:
     """Deriva un nombre de archivo seguro de la URL (o del título de respaldo)."""
+    # Un título que ya es un nombre de archivo (extensión limpia al final) es más
+    # fiable que el nombre de la URL: las descargas firmadas de Udemy terminan
+    # todas en "original.<ext>".
+    if title and _CLEAN_EXT_RE.match(Path(title).suffix):
+        return slugify(title)
     path = unquote(urlsplit(url).path)
     candidate = Path(path).name
     if candidate and "." in candidate:

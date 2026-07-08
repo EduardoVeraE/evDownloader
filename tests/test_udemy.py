@@ -16,7 +16,7 @@ import asyncio
 from video_downloader.config import Settings, session_file
 from video_downloader.extractors import get_extractor, get_extractor_by_name
 from video_downloader.extractors.udemy import UdemyExtractor
-from video_downloader.models import Unit, UnitType
+from video_downloader.models import ResourceKind, Unit, UnitType
 
 
 # Fixture con el formato que produce yt-dlp en modo flat (--flat-playlist).
@@ -97,6 +97,20 @@ def test_build_course_sin_entries() -> None:
     assert course.chapters == []
 
 
+def test_build_course_normaliza_capitulo_undefined() -> None:
+    # yt-dlp marca las clases sueltas (sin sección) con chapter="Undefined".
+    info = {
+        "title": "C",
+        "entries": [
+            _entry("1", "Suelta", "Undefined", 1),
+            _entry("2", "En sección", "Módulo 1", 2),
+        ],
+    }
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", info)
+    assert course.chapters[0].title == "Sección 1"  # no "Undefined"
+    assert course.chapters[1].title == "Módulo 1"
+
+
 # -- list_course exige cookies del navegador ---------------------------------
 def test_list_course_sin_cookies_lanza() -> None:
     ex = UdemyExtractor()  # sin configure -> sin cookies_from_browser
@@ -124,6 +138,50 @@ def test_resolve_video_ignora_no_video() -> None:
     ex = UdemyExtractor()
     unit = Unit(title="q", url="https://www.udemy.com/x/quiz/1", type=UnitType.QUIZ, index=1)
     assert asyncio.run(ex.resolve_video(None, unit)) is None
+
+
+# -- Recursos suplementarios (adjuntos y enlaces) ----------------------------
+def test_ids_from_url_extrae_course_y_lecture() -> None:
+    url = (
+        "https://www.udemy.com/course-dashboard-redirect/learn/v4/t/lecture/49299317"
+        "#__youtubedl_smuggle=%7B%22course_id%22%3A+%223984982%22%7D"
+    )
+    assert UdemyExtractor._ids_from_url(url) == ("3984982", "49299317")
+
+
+def test_ids_from_url_sin_datos() -> None:
+    assert UdemyExtractor._ids_from_url("https://www.udemy.com/course/x/") == (None, None)
+
+
+def test_assets_to_resources_archivo_usa_filename() -> None:
+    assets = [
+        {
+            "asset_type": "File",
+            "title": "RECURSOS WEB.pdf",
+            "filename": "RECURSOS-WEB.pdf",
+            "external_url": "",
+            "download_urls": {"File": [{"label": "download", "file": "https://att-c.udemycdn.com/x/original.pdf?Signature=abc"}]},
+        }
+    ]
+    res = UdemyExtractor._assets_to_resources(assets)
+    assert len(res) == 1
+    assert res[0].kind is ResourceKind.FILE
+    # Usa el filename real (no "original.pdf" de la URL) para evitar colisiones.
+    assert res[0].title == "RECURSOS-WEB.pdf"
+    assert res[0].url.startswith("https://att-c.udemycdn.com/")
+
+
+def test_assets_to_resources_enlace_externo() -> None:
+    assets = [{"asset_type": "ExternalLink", "title": "Repo", "external_url": "https://github.com/x"}]
+    res = UdemyExtractor._assets_to_resources(assets)
+    assert len(res) == 1
+    assert res[0].kind is ResourceKind.LINK
+    assert res[0].url == "https://github.com/x"
+
+
+def test_assets_to_resources_omite_sin_url() -> None:
+    assets = [{"asset_type": "File", "title": "x", "external_url": "", "download_urls": {}}]
+    assert UdemyExtractor._assets_to_resources(assets) == []
 
 
 # -- Sesión por plataforma ----------------------------------------------------

@@ -21,13 +21,32 @@ núcleo lo registra como fallo de esa clase y continúa con el resto.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any
+from urllib.parse import unquote_plus
 
+import rnet
 from playwright.async_api import BrowserContext
 
-from ..config import UDEMY_BASE_URL, UDEMY_LOGIN_URL, Settings
-from ..models import Chapter, Course, Unit, UnitType, VideoSource
+from ..config import RNET_IMPERSONATE, UDEMY_BASE_URL, UDEMY_LOGIN_URL, Settings
+from ..models import (
+    Chapter,
+    Course,
+    Resource,
+    ResourceKind,
+    Unit,
+    UnitExtras,
+    UnitType,
+    VideoSource,
+)
 from .base import Extractor
+
+_LECTURE_ID_RE = re.compile(r"/lecture/(\d+)")
+# course_id viaja "smuggleado" por yt-dlp en el fragmento de la URL de la clase.
+_COURSE_ID_RE = re.compile(r'"course_id":\s*"?(\d+)"?')
+# Valor con que yt-dlp marca las clases sueltas sin sección nombrada.
+_UNNAMED_CHAPTER = "Undefined"
 
 
 class UdemyExtractor(Extractor):
@@ -39,6 +58,8 @@ class UdemyExtractor(Extractor):
 
     def __init__(self) -> None:
         self._cookies_from_browser: str | None = None
+        self._cookie_header: str | None = None
+        self._client: rnet.Client | None = None
 
     def configure(self, settings: Settings) -> None:
         self._cookies_from_browser = settings.cookies_from_browser
@@ -86,11 +107,14 @@ class UdemyExtractor(Extractor):
                 continue
             seen.add(entry_url)
 
-            ch_key = entry.get("chapter_number") or entry.get("chapter") or 0
+            ch_name = entry.get("chapter")
+            if ch_name == _UNNAMED_CHAPTER:
+                ch_name = None
+            ch_key = entry.get("chapter_number") or ch_name or 0
             if ch_key != current_key:
                 current_key = ch_key
                 current = Chapter(
-                    title=(entry.get("chapter") or f"Sección {len(chapters) + 1}").strip(),
+                    title=(ch_name or f"Sección {len(chapters) + 1}").strip(),
                     index=len(chapters) + 1,
                     units=[],
                 )
@@ -119,3 +143,104 @@ class UdemyExtractor(Extractor):
         # la resuelve con las cookies del navegador (settings.cookies_from_browser).
         # write_subs=True: yt-dlp baja también los subtítulos de la lección.
         return VideoSource(url=unit.url, is_embed=True, write_subs=True)
+
+    # -- Material complementario (recursos adjuntos y enlaces) ---------------
+    async def resolve_extras(
+        self, ctx: BrowserContext | None, unit: Unit, *, capture_page: bool = False
+    ) -> UnitExtras:
+        """Recursos suplementarios de la lección (adjuntos y enlaces externos).
+
+        Se consultan en la API 2.0 de Udemy con las cookies del navegador. Las
+        URLs de descarga que devuelve Udemy están firmadas (no requieren cookies
+        para bajarlas). No se captura MHTML (no hay navegador).
+        """
+        if not unit.url or not self._cookies_from_browser:
+            return UnitExtras()
+        course_id, lecture_id = self._ids_from_url(unit.url)
+        if not course_id or not lecture_id:
+            return UnitExtras()
+        assets = await self._fetch_supplementary(course_id, lecture_id)
+        return UnitExtras(resources=self._assets_to_resources(assets))
+
+    @staticmethod
+    def _ids_from_url(url: str) -> tuple[str | None, str | None]:
+        """Extrae ``(course_id, lecture_id)`` de la URL de una lección."""
+        lecture = _LECTURE_ID_RE.search(url)
+        course = _COURSE_ID_RE.search(unquote_plus(url))
+        return (
+            course.group(1) if course else None,
+            lecture.group(1) if lecture else None,
+        )
+
+    @staticmethod
+    def _assets_to_resources(assets: list[dict[str, Any]]) -> list[Resource]:
+        """Convierte los ``supplementary_assets`` de Udemy en ``Resource``."""
+        resources: list[Resource] = []
+        for a in assets:
+            external = a.get("external_url")
+            if external:
+                resources.append(
+                    Resource(
+                        title=(a.get("title") or a.get("filename") or "enlace").strip(),
+                        url=external,
+                        kind=ResourceKind.LINK,
+                    )
+                )
+                continue
+            # download_urls es {asset_type: [{"label", "file"}]}; tomar la 1ª URL.
+            file_url = next(
+                (
+                    v[0]["file"]
+                    for v in (a.get("download_urls") or {}).values()
+                    if v and v[0].get("file")
+                ),
+                None,
+            )
+            if file_url:
+                resources.append(
+                    Resource(
+                        # El filename real evita colisiones (las URLs firmadas
+                        # terminan todas en "original.<ext>").
+                        title=(a.get("filename") or a.get("title") or "recurso").strip(),
+                        url=file_url,
+                        kind=ResourceKind.FILE,
+                    )
+                )
+        return resources
+
+    async def _fetch_supplementary(self, course_id: str, lecture_id: str) -> list[dict[str, Any]]:
+        url = (
+            f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/{course_id}"
+            f"/lectures/{lecture_id}/?fields[lecture]=supplementary_assets"
+            f"&fields[asset]=asset_type,title,filename,download_urls,external_url"
+        )
+        headers = {
+            "Cookie": self._udemy_cookie_header(),
+            "Referer": "https://www.udemy.com/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            resp = await self._rnet_client().get(url, headers=headers)
+            data = json.loads(await resp.text())
+        except Exception:  # noqa: BLE001
+            return []
+        return data.get("supplementary_assets") or []
+
+    def _rnet_client(self) -> rnet.Client:
+        if self._client is None:
+            self._client = rnet.Client(
+                impersonate=getattr(rnet.Impersonate, RNET_IMPERSONATE, None)
+            )
+        return self._client
+
+    def _udemy_cookie_header(self) -> str:
+        """Construye (una vez) el header Cookie de udemy.com desde el navegador."""
+        if self._cookie_header is None:
+            from yt_dlp.cookies import extract_cookies_from_browser
+
+            assert self._cookies_from_browser is not None
+            jar = extract_cookies_from_browser(self._cookies_from_browser)
+            self._cookie_header = "; ".join(
+                f"{c.name}={c.value}" for c in jar if "udemy.com" in (c.domain or "")
+            )
+        return self._cookie_header
