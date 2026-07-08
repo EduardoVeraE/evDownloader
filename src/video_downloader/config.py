@@ -72,6 +72,9 @@ class Settings:
     # usan los extractores que delegan en yt-dlp (Udemy) para autenticar sin
     # navegador automatizado. None = no usar cookies del navegador.
     cookies_from_browser: str | None = None
+    # Idiomas de subtítulos a descargar (formato yt-dlp: "all", "es,en", "es.*").
+    # Aplica a los extractores que delegan los subtítulos en yt-dlp (Udemy).
+    sub_langs: str = "all"
 
 
 def ensure_dirs() -> None:

@@ -117,4 +117,5 @@ class UdemyExtractor(Extractor):
             return None
         # No se resuelve aquí: el downloader (yt-dlp) toma la URL de la lección y
         # la resuelve con las cookies del navegador (settings.cookies_from_browser).
-        return VideoSource(url=unit.url, is_embed=True)
+        # write_subs=True: yt-dlp baja también los subtítulos de la lección.
+        return VideoSource(url=unit.url, is_embed=True, write_subs=True)

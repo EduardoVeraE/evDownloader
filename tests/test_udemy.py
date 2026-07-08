@@ -116,6 +116,8 @@ def test_resolve_video_devuelve_url_de_leccion() -> None:
     assert src is not None
     assert src.url == "https://www.udemy.com/x/lecture/1"
     assert src.is_embed is True
+    # yt-dlp debe extraer los subtítulos junto con el video.
+    assert src.write_subs is True
 
 
 def test_resolve_video_ignora_no_video() -> None:

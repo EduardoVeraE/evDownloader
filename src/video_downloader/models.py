@@ -79,6 +79,10 @@ class VideoSource(BaseModel):
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_jar: list[Cookie] = Field(default_factory=list)
     subtitles: list[Subtitle] = Field(default_factory=list)
+    # Si el downloader (yt-dlp) debe extraer los subtítulos junto con el video.
+    # Lo usan los extractores que delegan la resolución en yt-dlp (Udemy); los
+    # que traen las URLs de subtítulos aparte (Platzi) lo dejan en False.
+    write_subs: bool = False
 
 
 class Unit(BaseModel):

@@ -68,6 +68,9 @@ def download(
         "--cookies-from-browser",
         help="Navegador del que leer cookies (chrome, brave, safari...). Requerido para Udemy.",
     ),
+    sub_langs: str = typer.Option(
+        "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."
+    ),
     show_browser: bool = typer.Option(
         False, "--show-browser", help="Mostrar el navegador (no headless)."
     ),
@@ -85,6 +88,7 @@ def download(
         limit=limit,
         resources=not no_resources,
         cookies_from_browser=cookies_from_browser,
+        sub_langs=sub_langs,
     )
     asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
 

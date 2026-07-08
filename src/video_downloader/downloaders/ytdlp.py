@@ -54,6 +54,13 @@ class YtDlpDownloader(Downloader):
             "noprogress": False,
         }
 
+        if source.write_subs:
+            # yt-dlp extrae los subtítulos junto al video (Udemy). Se escriben
+            # como <nombre>.<lang>.vtt junto al .mp4, con el mismo outtmpl.
+            opts["writesubtitles"] = True
+            opts["subtitleslangs"] = [x for x in settings.sub_langs.split(",") if x]
+            opts["subtitlesformat"] = "vtt/best"
+
         cookiefile: str | None = None
         try:
             if source.cookie_jar:
