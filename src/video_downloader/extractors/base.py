@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from playwright.async_api import BrowserContext
 
 from ..models import Course, Unit, UnitExtras, VideoSource
+
+if TYPE_CHECKING:
+    from ..config import Settings
 
 
 class Extractor(ABC):
@@ -24,6 +28,11 @@ class Extractor(ABC):
     #: (archivo de cookies ``session-{name}.json``).
     name: str = "base"
 
+    #: Si el extractor necesita un contexto de navegador (Playwright) para
+    #: operar. Los extractores que delegan en yt-dlp (p. ej. Udemy) lo ponen en
+    #: ``False`` para que el núcleo NO abra Playwright.
+    needs_browser: bool = True
+
     #: URL donde el usuario inicia sesión manualmente.
     login_url: str = ""
     #: URL a la que navegar para verificar que la sesión sigue activa.
@@ -33,21 +42,31 @@ class Extractor(ABC):
     #: coma. Lo usan ``session.login`` y ``session.is_logged_in``.
     auth_ready_selector: str = ""
 
+    def configure(self, settings: Settings) -> None:  # noqa: B027
+        """Recibe los ajustes de la ejecución antes de listar/descargar.
+
+        El núcleo la invoca tras construir el extractor. La implementación por
+        defecto no hace nada; los extractores que necesitan opciones de runtime
+        (p. ej. Udemy con ``cookies_from_browser``) la sobrescriben.
+        """
+
     @staticmethod
     @abstractmethod
     def supports(url: str) -> bool:
         """Indica si este extractor puede manejar la URL dada."""
 
     @abstractmethod
-    async def list_course(self, ctx: BrowserContext, url: str) -> Course:
+    async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
         """Extrae la estructura del curso (capítulos y unidades)."""
 
     @abstractmethod
-    async def resolve_video(self, ctx: BrowserContext, unit: Unit) -> VideoSource | None:
-        """Resuelve la fuente de video de una unidad navegando a su página."""
+    async def resolve_video(
+        self, ctx: BrowserContext | None, unit: Unit
+    ) -> VideoSource | None:
+        """Resuelve la fuente de video de una unidad."""
 
     async def resolve_extras(
-        self, ctx: BrowserContext, unit: Unit, *, capture_page: bool = False
+        self, ctx: BrowserContext | None, unit: Unit, *, capture_page: bool = False
     ) -> UnitExtras:
         """Resuelve el material complementario de una unidad.
 

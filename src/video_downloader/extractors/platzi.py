@@ -107,7 +107,8 @@ class PlatziExtractor(Extractor):
         return "platzi.com" in url
 
     # -- Estructura del curso ------------------------------------------------
-    async def list_course(self, ctx: BrowserContext, url: str) -> Course:
+    async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
@@ -173,9 +174,12 @@ class PlatziExtractor(Extractor):
         return UnitType.LECTURE
 
     # -- Resolución de la fuente de video -----------------------------------
-    async def resolve_video(self, ctx: BrowserContext, unit: Unit) -> VideoSource | None:
+    async def resolve_video(
+        self, ctx: BrowserContext | None, unit: Unit
+    ) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
         embed_urls: list[str] = []
@@ -255,10 +259,11 @@ class PlatziExtractor(Extractor):
 
     # -- Material complementario (resumen, recursos, snapshot) ---------------
     async def resolve_extras(
-        self, ctx: BrowserContext, unit: Unit, *, capture_page: bool = False
+        self, ctx: BrowserContext | None, unit: Unit, *, capture_page: bool = False
     ) -> UnitExtras:
         if not unit.url:
             return UnitExtras()
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
         try:

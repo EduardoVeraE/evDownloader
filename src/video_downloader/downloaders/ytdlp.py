@@ -59,6 +59,10 @@ class YtDlpDownloader(Downloader):
             if source.cookie_jar:
                 cookiefile = self._write_cookiefile(source.cookie_jar)
                 opts["cookiefile"] = cookiefile
+            elif settings.cookies_from_browser:
+                # yt-dlp lee las cookies directamente del navegador real del
+                # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
+                opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
             elif source.cookies:
                 # Respaldo si no hay cookies completas: header (deprecado).
                 opts["http_headers"] = {

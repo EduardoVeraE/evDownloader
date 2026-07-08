@@ -26,35 +26,46 @@ console = Console()
 async def download_course(url: str, settings: Settings, *, use_cache: bool = True) -> None:
     """Descarga un curso completo a ``settings.download_dir``."""
     extractor = get_extractor(url)
+    extractor.configure(settings)
     downloader = get_downloader(settings.downloader)
 
-    async with browser.browser_context(
-        headless=settings.headless, platform=extractor.name
-    ) as ctx:
-        course = await _load_structure(extractor, ctx, url, use_cache=use_cache)
-        console.print(
-            f"[bold cyan]{course.title}[/bold cyan] — "
-            f"{sum(len(c.units) for c in course.chapters)} unidades en "
-            f"{len(course.chapters)} capítulos"
-        )
-
-        course_dir = safe_mkdir(settings.download_dir / slugify(course.title))
-
-        downloaded = 0
-        for chapter in course.chapters:
-            chapter_dir = safe_mkdir(course_dir / numbered(chapter.index, chapter.title))
-            for unit in chapter.units:
-                if unit.type == UnitType.VIDEO:
-                    if settings.limit is not None and downloaded >= settings.limit:
-                        console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
-                        break
-                    downloaded += 1
-                await _process_unit(extractor, downloader, ctx, unit, chapter_dir, settings)
-            else:
-                continue
-            break
+    if extractor.needs_browser:
+        async with browser.browser_context(
+            headless=settings.headless, platform=extractor.name
+        ) as ctx:
+            await _run_download(extractor, downloader, ctx, url, settings, use_cache=use_cache)
+    else:
+        # Extractores que delegan en yt-dlp (Udemy) no abren navegador.
+        await _run_download(extractor, downloader, None, url, settings, use_cache=use_cache)
 
     console.print("[bold green]Descarga finalizada.[/bold green]")
+
+
+async def _run_download(
+    extractor, downloader, ctx, url: str, settings: Settings, *, use_cache: bool
+) -> None:
+    course = await _load_structure(extractor, ctx, url, use_cache=use_cache)
+    console.print(
+        f"[bold cyan]{course.title}[/bold cyan] — "
+        f"{sum(len(c.units) for c in course.chapters)} unidades en "
+        f"{len(course.chapters)} capítulos"
+    )
+
+    course_dir = safe_mkdir(settings.download_dir / slugify(course.title))
+
+    downloaded = 0
+    for chapter in course.chapters:
+        chapter_dir = safe_mkdir(course_dir / numbered(chapter.index, chapter.title))
+        for unit in chapter.units:
+            if unit.type == UnitType.VIDEO:
+                if settings.limit is not None and downloaded >= settings.limit:
+                    console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
+                    break
+                downloaded += 1
+            await _process_unit(extractor, downloader, ctx, unit, chapter_dir, settings)
+        else:
+            continue
+        break
 
 
 async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Course:

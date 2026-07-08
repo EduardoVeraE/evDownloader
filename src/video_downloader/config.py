@@ -68,6 +68,10 @@ class Settings:
     concurrency: int = 8
     limit: int | None = None  # nº máximo de clases de video a descargar (None = todas)
     resources: bool = True  # descargar resumen, archivos adjuntos, enlaces y MHTML
+    # Navegador del que yt-dlp lee las cookies (chrome, brave, safari...). Lo
+    # usan los extractores que delegan en yt-dlp (Udemy) para autenticar sin
+    # navegador automatizado. None = no usar cookies del navegador.
+    cookies_from_browser: str | None = None
 
 
 def ensure_dirs() -> None:

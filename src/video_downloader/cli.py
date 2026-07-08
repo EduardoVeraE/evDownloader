@@ -63,6 +63,11 @@ def download(
     no_resources: bool = typer.Option(
         False, "--no-resources", help="No descargar resumen, adjuntos, enlaces ni MHTML."
     ),
+    cookies_from_browser: str | None = typer.Option(
+        None,
+        "--cookies-from-browser",
+        help="Navegador del que leer cookies (chrome, brave, safari...). Requerido para Udemy.",
+    ),
     show_browser: bool = typer.Option(
         False, "--show-browser", help="Mostrar el navegador (no headless)."
     ),
@@ -79,6 +84,7 @@ def download(
         headless=not show_browser,
         limit=limit,
         resources=not no_resources,
+        cookies_from_browser=cookies_from_browser,
     )
     asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
 
