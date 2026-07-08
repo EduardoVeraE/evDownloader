@@ -13,34 +13,36 @@ from typing import Any, cast
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from .config import DEFAULT_USER_AGENT, SESSION_FILE, ensure_dirs
+from .config import DEFAULT_USER_AGENT, ensure_dirs, session_file
 from .models import Cookie
 
 
-def load_cookies() -> list[dict[str, Any]]:
-    """Lee las cookies persistidas de la sesión, o lista vacía."""
-    if not SESSION_FILE.exists():
+def load_cookies(platform: str) -> list[dict[str, Any]]:
+    """Lee las cookies persistidas de la plataforma, o lista vacía."""
+    path = session_file(platform)
+    if not path.exists():
         return []
     try:
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("cookies", [])
     except (json.JSONDecodeError, OSError):
         return []
 
 
-def save_cookies(cookies: Sequence[Mapping[str, Any]]) -> None:
-    """Persiste las cookies de la sesión a disco."""
+def save_cookies(cookies: Sequence[Mapping[str, Any]], platform: str) -> None:
+    """Persiste las cookies de la plataforma a disco."""
     ensure_dirs()
-    SESSION_FILE.write_text(
+    session_file(platform).write_text(
         json.dumps({"cookies": list(cookies)}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
 
-def clear_session() -> bool:
-    """Elimina el archivo de sesión. Devuelve True si existía."""
-    if SESSION_FILE.exists():
-        SESSION_FILE.unlink()
+def clear_session(platform: str) -> bool:
+    """Elimina el archivo de sesión de la plataforma. Devuelve True si existía."""
+    path = session_file(platform)
+    if path.exists():
+        path.unlink()
         return True
     return False
 
@@ -71,21 +73,26 @@ def cookies_as_records(cookies: Sequence[Mapping[str, Any]]) -> list[Cookie]:
 
 @asynccontextmanager
 async def browser_context(
-    *, headless: bool = True, with_session: bool = True
+    *, headless: bool = True, with_session: bool = True, platform: str | None = None
 ) -> AsyncIterator[BrowserContext]:
     """Abre un contexto de navegador con UA coherente y cookies opcionales.
 
+    Si ``with_session`` es True, carga las cookies de ``platform`` (obligatorio
+    en ese caso).
+
     Uso::
 
-        async with browser_context() as ctx:
+        async with browser_context(platform="platzi") as ctx:
             page = await ctx.new_page()
             ...
     """
+    if with_session and platform is None:
+        raise ValueError("browser_context requiere 'platform' cuando with_session=True")
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
-        if with_session:
-            cookies = load_cookies()
+        if with_session and platform is not None:
+            cookies = load_cookies(platform)
             if cookies:
                 await context.add_cookies(cast("Any", cookies))
         try:

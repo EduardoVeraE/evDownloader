@@ -20,7 +20,7 @@ import re
 from playwright.async_api import BrowserContext, Request
 
 from .. import browser
-from ..config import DEFAULT_USER_AGENT, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
+from ..config import DEFAULT_USER_AGENT, LOGIN_URL, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
 from ..models import (
     Chapter,
     Course,
@@ -97,13 +97,18 @@ _VTT_RE = re.compile(r"https?://[^\s\"'}]+\.vtt\b")
 
 class PlatziExtractor(Extractor):
     name = "platzi"
+    login_url = LOGIN_URL
+    home_url = PLATZI_BASE_URL
+    # El avatar del menú de usuario solo aparece tras autenticarse.
+    auth_ready_selector = "[class*='Menu'] img, [class*='Avatar'], a[href*='/p/']"
 
     @staticmethod
     def supports(url: str) -> bool:
         return "platzi.com" in url
 
     # -- Estructura del curso ------------------------------------------------
-    async def list_course(self, ctx: BrowserContext, url: str) -> Course:
+    async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
@@ -169,9 +174,12 @@ class PlatziExtractor(Extractor):
         return UnitType.LECTURE
 
     # -- Resolución de la fuente de video -----------------------------------
-    async def resolve_video(self, ctx: BrowserContext, unit: Unit) -> VideoSource | None:
+    async def resolve_video(
+        self, ctx: BrowserContext | None, unit: Unit
+    ) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
         embed_urls: list[str] = []
@@ -251,10 +259,11 @@ class PlatziExtractor(Extractor):
 
     # -- Material complementario (resumen, recursos, snapshot) ---------------
     async def resolve_extras(
-        self, ctx: BrowserContext, unit: Unit, *, capture_page: bool = False
+        self, ctx: BrowserContext | None, unit: Unit, *, capture_page: bool = False
     ) -> UnitExtras:
         if not unit.url:
             return UnitExtras()
+        assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
         try:

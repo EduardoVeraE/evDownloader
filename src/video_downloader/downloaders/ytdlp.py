@@ -54,11 +54,22 @@ class YtDlpDownloader(Downloader):
             "noprogress": False,
         }
 
+        if source.write_subs:
+            # yt-dlp extrae los subtítulos junto al video (Udemy). Se escriben
+            # como <nombre>.<lang>.vtt junto al .mp4, con el mismo outtmpl.
+            opts["writesubtitles"] = True
+            opts["subtitleslangs"] = [x for x in settings.sub_langs.split(",") if x]
+            opts["subtitlesformat"] = "vtt/best"
+
         cookiefile: str | None = None
         try:
             if source.cookie_jar:
                 cookiefile = self._write_cookiefile(source.cookie_jar)
                 opts["cookiefile"] = cookiefile
+            elif settings.cookies_from_browser:
+                # yt-dlp lee las cookies directamente del navegador real del
+                # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
+                opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
             elif source.cookies:
                 # Respaldo si no hay cookies completas: header (deprecado).
                 opts["http_headers"] = {
