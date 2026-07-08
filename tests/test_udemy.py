@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 
-from video_downloader.config import Settings, session_file
-from video_downloader.extractors import get_extractor, get_extractor_by_name
-from video_downloader.extractors.udemy import UdemyExtractor
-from video_downloader.models import ResourceKind, Unit, UnitType
+from evdownloader.config import Settings, session_file
+from evdownloader.extractors import get_extractor, get_extractor_by_name
+from evdownloader.extractors.udemy import UdemyExtractor
+from evdownloader.models import ResourceKind, Unit, UnitType
 
 
 # Fixture con el formato que produce yt-dlp en modo flat (--flat-playlist).

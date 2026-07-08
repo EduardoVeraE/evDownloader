@@ -1,12 +1,31 @@
 [project]
-name = "video-downloader"
+name = "evDownloader"
 version = "0.1.0"
-description = "Descargador de cursos de video (foco inicial en Platzi) con extracción por interceptación de red y motor híbrido yt-dlp / nativo."
+description = "Descargador de cursos de video para Platzi, Udemy y Codigofacilito, con extracción por interceptación de red y motor híbrido yt-dlp / nativo."
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "MIT" }
-authors = [{ name = "eduardo", email = "eduvera@gmail.com" }]
-keywords = ["platzi", "downloader", "hls", "m3u8", "mediastream", "yt-dlp"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Eduardo Vera", email = "eduvera@gmail.com" }]
+keywords = [
+    "platzi",
+    "udemy",
+    "codigofacilito",
+    "downloader",
+    "courses",
+    "hls",
+    "m3u8",
+    "yt-dlp",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Video",
+    "Operating System :: OS Independent",
+]
 
 dependencies = [
     "typer>=0.15.0",
@@ -31,14 +50,20 @@ dev = [
 ]
 
 [project.scripts]
-video-downloader = "video_downloader.cli:app"
+evdownloader = "evdownloader.cli:app"
+evd = "evdownloader.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/EduardoVeraE/evDownloader"
+Repository = "https://github.com/EduardoVeraE/evDownloader"
+Issues = "https://github.com/EduardoVeraE/evDownloader/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/video_downloader"]
+packages = ["src/evdownloader"]
 
 [tool.ruff]
 line-length = 100
@@ -49,7 +74,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer requiere llamadas (typer.Option/Argument) en los valores por defecto.
-"src/video_downloader/cli.py" = ["B008"]
+"src/evdownloader/cli.py" = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

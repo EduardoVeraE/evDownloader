@@ -12,7 +12,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-APP_NAME = "video-downloader"
+APP_NAME = "evDownloader"
 
 # --- Rutas persistentes -----------------------------------------------------
 DATA_DIR = Path(user_data_dir(APP_NAME, appauthor=False))

@@ -12,7 +12,7 @@ from . import cache, session
 from .config import Settings, ensure_dirs
 
 app = typer.Typer(
-    name="video-downloader",
+    name="evdownloader",
     help="Descargador de cursos de video (Platzi, Udemy, Codigofacilito).",
     no_args_is_help=True,
     add_completion=False,
@@ -112,8 +112,26 @@ def status(platform: str = _PLATFORM_ARG) -> None:
         console.print("[green]Sesión activa.[/green]")
     else:
         console.print(
-            f"[yellow]Sin sesión. Ejecuta 'video-downloader login {platform}'.[/yellow]"
+            f"[yellow]Sin sesión. Ejecuta 'evdownloader login {platform}'.[/yellow]"
         )
+
+
+@app.command()
+def setup() -> None:
+    """Instala el navegador Chromium de Playwright (necesario solo para Platzi).
+
+    Udemy y Codigofacilito no lo requieren (usan yt-dlp + ``--cookies-from-browser``).
+    """
+    import subprocess
+    import sys
+
+    console.print("[cyan]Instalando Chromium de Playwright (necesario para Platzi)…[/cyan]")
+    code = subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"])
+    if code == 0:
+        console.print("[green]Chromium instalado.[/green]")
+    else:
+        console.print("[red]Falló la instalación de Chromium.[/red]")
+    raise typer.Exit(code=code)
 
 
 if __name__ == "__main__":

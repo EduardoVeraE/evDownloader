@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import asyncio
 
-from video_downloader.config import Settings, session_file
-from video_downloader.extractors import get_extractor, get_extractor_by_name
-from video_downloader.extractors.codigofacilito import CodigofacilitoExtractor
-from video_downloader.models import Unit, UnitType
+from evdownloader.config import Settings, session_file
+from evdownloader.extractors import get_extractor, get_extractor_by_name
+from evdownloader.extractors.codigofacilito import CodigofacilitoExtractor
+from evdownloader.models import Unit, UnitType
 
 
 def _item(href: str, li_mods: str, icon: str, kind: str, title: str) -> str:
