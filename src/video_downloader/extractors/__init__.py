@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from .base import Extractor
 from .platzi import PlatziExtractor
+from .udemy import UdemyExtractor
 
-_EXTRACTORS: list[type[Extractor]] = [PlatziExtractor]
+_EXTRACTORS: list[type[Extractor]] = [PlatziExtractor, UdemyExtractor]
+_BY_NAME: dict[str, type[Extractor]] = {cls.name: cls for cls in _EXTRACTORS}
 
 
 def get_extractor(url: str) -> Extractor:
@@ -21,4 +23,19 @@ def get_extractor(url: str) -> Extractor:
     raise ValueError(f"No hay extractor que soporte la URL: {url}")
 
 
-__all__ = ["Extractor", "PlatziExtractor", "get_extractor"]
+def get_extractor_by_name(name: str) -> Extractor:
+    """Devuelve la instancia de extractor registrada con ese nombre de plataforma."""
+    cls = _BY_NAME.get(name)
+    if cls is None:
+        disponibles = ", ".join(sorted(_BY_NAME))
+        raise ValueError(f"Plataforma desconocida: {name!r}. Disponibles: {disponibles}")
+    return cls()
+
+
+__all__ = [
+    "Extractor",
+    "PlatziExtractor",
+    "UdemyExtractor",
+    "get_extractor",
+    "get_extractor_by_name",
+]

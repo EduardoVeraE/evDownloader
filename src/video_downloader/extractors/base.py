@@ -20,8 +20,18 @@ class Extractor(ABC):
            adjuntos y/o snapshot de la página.
     """
 
-    #: Nombre legible de la plataforma.
+    #: Nombre legible de la plataforma. Se usa también como clave de sesión
+    #: (archivo de cookies ``session-{name}.json``).
     name: str = "base"
+
+    #: URL donde el usuario inicia sesión manualmente.
+    login_url: str = ""
+    #: URL a la que navegar para verificar que la sesión sigue activa.
+    home_url: str = ""
+    #: Selector que solo aparece cuando la sesión está autenticada (p. ej. el
+    #: avatar o menú de usuario). Puede listar varias alternativas separadas por
+    #: coma. Lo usan ``session.login`` y ``session.is_logged_in``.
+    auth_ready_selector: str = ""
 
     @staticmethod
     @abstractmethod

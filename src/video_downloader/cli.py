@@ -13,25 +13,27 @@ from .config import Settings, ensure_dirs
 
 app = typer.Typer(
     name="video-downloader",
-    help="Descargador de cursos de video (foco inicial en Platzi).",
+    help="Descargador de cursos de video (Platzi, Udemy).",
     no_args_is_help=True,
     add_completion=False,
 )
 console = Console()
 
+_PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy.")
+
 
 @app.command()
-def login() -> None:
-    """Inicia sesión en Platzi (abre el navegador para login manual)."""
+def login(platform: str = _PLATFORM_ARG) -> None:
+    """Inicia sesión en la plataforma (abre el navegador para login manual)."""
     ensure_dirs()
-    ok = asyncio.run(session.login())
+    ok = asyncio.run(session.login(platform))
     raise typer.Exit(code=0 if ok else 1)
 
 
 @app.command()
-def logout() -> None:
-    """Cierra la sesión eliminando las cookies guardadas."""
-    if session.logout():
+def logout(platform: str = _PLATFORM_ARG) -> None:
+    """Cierra la sesión de la plataforma eliminando sus cookies guardadas."""
+    if session.logout(platform):
         console.print("[green]Sesión cerrada.[/green]")
     else:
         console.print("[yellow]No había una sesión activa.[/yellow]")
@@ -89,13 +91,15 @@ def clear_cache() -> None:
 
 
 @app.command()
-def status() -> None:
-    """Muestra si hay una sesión activa."""
-    logged = asyncio.run(session.is_logged_in())
+def status(platform: str = _PLATFORM_ARG) -> None:
+    """Muestra si hay una sesión activa en la plataforma."""
+    logged = asyncio.run(session.is_logged_in(platform))
     if logged:
         console.print("[green]Sesión activa.[/green]")
     else:
-        console.print("[yellow]Sin sesión. Ejecuta 'video-downloader login'.[/yellow]")
+        console.print(
+            f"[yellow]Sin sesión. Ejecuta 'video-downloader login {platform}'.[/yellow]"
+        )
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ import re
 from playwright.async_api import BrowserContext, Request
 
 from .. import browser
-from ..config import DEFAULT_USER_AGENT, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
+from ..config import DEFAULT_USER_AGENT, LOGIN_URL, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
 from ..models import (
     Chapter,
     Course,
@@ -97,6 +97,10 @@ _VTT_RE = re.compile(r"https?://[^\s\"'}]+\.vtt\b")
 
 class PlatziExtractor(Extractor):
     name = "platzi"
+    login_url = LOGIN_URL
+    home_url = PLATZI_BASE_URL
+    # El avatar del menú de usuario solo aparece tras autenticarse.
+    auth_ready_selector = "[class*='Menu'] img, [class*='Avatar'], a[href*='/p/']"
 
     @staticmethod
     def supports(url: str) -> bool:

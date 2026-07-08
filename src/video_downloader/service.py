@@ -28,7 +28,9 @@ async def download_course(url: str, settings: Settings, *, use_cache: bool = Tru
     extractor = get_extractor(url)
     downloader = get_downloader(settings.downloader)
 
-    async with browser.browser_context(headless=settings.headless) as ctx:
+    async with browser.browser_context(
+        headless=settings.headless, platform=extractor.name
+    ) as ctx:
         course = await _load_structure(extractor, ctx, url, use_cache=use_cache)
         console.print(
             f"[bold cyan]{course.title}[/bold cyan] — "

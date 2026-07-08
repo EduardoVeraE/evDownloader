@@ -16,8 +16,16 @@ APP_NAME = "video-downloader"
 
 # --- Rutas persistentes -----------------------------------------------------
 DATA_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
-SESSION_FILE = DATA_DIR / "session.json"
 CACHE_DIR = DATA_DIR / "cache"
+
+
+def session_file(platform: str) -> Path:
+    """Archivo de cookies para una plataforma (``session-{platform}.json``).
+
+    Cada plataforma persiste su sesión por separado para que autenticarse en
+    una (p. ej. Udemy) no pise la sesión de otra (Platzi).
+    """
+    return DATA_DIR / f"session-{platform}.json"
 
 # --- Identidad de navegador (coherente entre navegación y descarga) ---------
 # Usar el MISMO User-Agent al navegar con Playwright y al descargar evita los
@@ -39,6 +47,10 @@ LOGIN_URL = "https://platzi.com/login/"
 # Endpoint para validar que la sesión sigue activa.
 LOGIN_DETAILS_URL = "https://platzi.com/api/v1/auth/me/"
 MEDIASTREAM_HOSTS = ("mdstrm.com",)
+
+# --- Endpoints / dominios de Udemy ------------------------------------------
+UDEMY_BASE_URL = "https://www.udemy.com"
+UDEMY_LOGIN_URL = "https://www.udemy.com/join/login-popup/"
 
 # Tiempo máximo (segundos) para que el usuario inicie sesión manualmente.
 LOGIN_TIMEOUT_S = 180
