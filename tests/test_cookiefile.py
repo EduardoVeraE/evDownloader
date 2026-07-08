@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from video_downloader.downloaders.ytdlp import _SESSION_COOKIE_EXPIRY, render_netscape
-from video_downloader.models import Cookie
+from evdownloader.downloaders.ytdlp import _SESSION_COOKIE_EXPIRY, render_netscape
+from evdownloader.models import Cookie
 
 
 def test_cabecera_netscape() -> None:

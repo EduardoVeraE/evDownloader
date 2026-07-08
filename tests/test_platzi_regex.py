@@ -6,13 +6,13 @@ playlists de subtítulos ``.vtt.m3u8``.
 
 from __future__ import annotations
 
-from video_downloader.extractors.platzi import (
+from evdownloader.extractors.platzi import (
     _M3U8_RE,
     _MDSTRM_EMBED_RE,
     _VTT_RE,
     PlatziExtractor,
 )
-from video_downloader.models import UnitType
+from evdownloader.models import UnitType
 
 
 def test_clasifica_video_por_miniatura_mdstrm() -> None:

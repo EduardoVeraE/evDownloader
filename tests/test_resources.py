@@ -4,9 +4,9 @@ y derivación de nombres de archivo.
 
 from __future__ import annotations
 
-from video_downloader.extractors.platzi import PlatziExtractor
-from video_downloader.models import ResourceKind
-from video_downloader.service import _filename_from_url
+from evdownloader.extractors.platzi import PlatziExtractor
+from evdownloader.models import ResourceKind
+from evdownloader.service import _filename_from_url
 
 
 def test_recurso_de_static_platzi_es_archivo() -> None:

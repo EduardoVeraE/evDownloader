@@ -1,4 +1,4 @@
-# video-downloader
+# evDownloader
 
 Descargador de cursos de video para **Platzi**, **Udemy** y **Codigofacilito**.
 Diseño extensible por *extractores* (una plataforma = un extractor) y motor de
@@ -25,24 +25,38 @@ Cada plataforma se autentica de una de dos formas, según su anti-bot:
 > Para **Udemy** y **Codigofacilito** debes tener la sesión **ya iniciada en tu
 > navegador** (Brave, Chrome, Safari, Edge o Firefox). No se usa el comando `login`.
 
-## Requisitos
+## Instalación
 
-- **Python 3.14+** (lo gestiona `uv`)
-- **FFmpeg** en el `PATH`
-- **Chromium** de Playwright — solo si vas a usar **Platzi**
-
-## Instalación rápida (macOS · Homebrew)
+evDownloader es una CLI de Python. Instálala como herramienta aislada con **uv**
+(recomendado) o **pipx**:
 
 ```bash
-# 1. Dependencias del sistema
-brew install uv ffmpeg
+# Con uv
+uv tool install evdownloader
 
-# 2. Dependencias del proyecto (uv instala Python 3.14 si falta)
-uv sync
-
-# 3. Solo si vas a usar Platzi: navegador de Playwright
-uv run playwright install chromium
+# …o con pipx
+pipx install evdownloader
 ```
+
+Esto deja disponibles los comandos `evdownloader` y su alias corto `evd`.
+
+### Prerrequisitos
+
+- **FFmpeg** en el `PATH` (muxeo y HLS):
+
+  ```bash
+  brew install ffmpeg      # macOS / Linux (Homebrew)
+  scoop install ffmpeg     # Windows (Scoop)
+  sudo apt install ffmpeg  # Debian / Ubuntu
+  ```
+
+- **Chromium de Playwright** — *solo si vas a usar Platzi*. Instálalo una vez:
+
+  ```bash
+  evdownloader setup
+  ```
+
+  Udemy y Codigofacilito no lo necesitan.
 
 ## Uso por plataforma
 
@@ -50,17 +64,17 @@ uv run playwright install chromium
 
 ```bash
 # Una vez: iniciar sesión (abre el navegador para login manual)
-uv run video-downloader login
+evdownloader login
 
 # Descargar el curso
-uv run video-downloader download "https://platzi.com/cursos/<curso>/"
+evdownloader download "https://platzi.com/cursos/<curso>/"
 ```
 
 ### Udemy
 
 ```bash
 # Requiere estar logueado en el navegador (ej. Brave) y pasar --cookies-from-browser
-uv run video-downloader download \
+evdownloader download \
   "https://www.udemy.com/course/<curso>/" \
   --cookies-from-browser brave
 ```
@@ -69,7 +83,7 @@ uv run video-downloader download \
 
 ```bash
 # Requiere estar logueado en el navegador (ej. Brave) y pasar --cookies-from-browser
-uv run video-downloader download \
+evdownloader download \
   "https://codigofacilito.com/cursos/<curso>" \
   --cookies-from-browser brave
 ```
@@ -80,22 +94,21 @@ La salida se organiza sola en `downloads/<Plataforma>/<curso>/<NN-módulo>/<NN-c
 
 ```bash
 # Platzi, calidad máxima 1080p, en un directorio concreto
-uv run video-downloader download "https://platzi.com/cursos/git-github/" \
-  -q 1080 -o ~/Cursos
+evdownloader download "https://platzi.com/cursos/git-github/" -q 1080 -o ~/Cursos
 
-# Codigofacilito, solo las primeras 5 clases (prueba rápida), leyendo cookies de Chrome
-uv run video-downloader download "https://codigofacilito.com/cursos/git-profesional" \
+# Codigofacilito, solo las primeras 5 clases (prueba rápida), cookies de Chrome
+evd download "https://codigofacilito.com/cursos/git-profesional" \
   --cookies-from-browser chrome --limit 5
 
 # Udemy, sin descargar recursos/adjuntos y forzando re-descarga
-uv run video-downloader download "https://www.udemy.com/course/<curso>/" \
+evdownloader download "https://www.udemy.com/course/<curso>/" \
   --cookies-from-browser brave --no-resources --overwrite
 
 # Solo subtítulos en español e inglés (plataformas que delegan subs en yt-dlp)
-uv run video-downloader download "<url>" --cookies-from-browser brave --sub-langs es,en
+evdownloader download "<url>" --cookies-from-browser brave --sub-langs es,en
 
 # Ver el navegador durante el login/descarga de Platzi (depuración)
-uv run video-downloader download "https://platzi.com/cursos/<curso>/" --show-browser
+evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 ```
 
 ## Opciones del comando `download`
@@ -116,16 +129,31 @@ uv run video-downloader download "https://platzi.com/cursos/<curso>/" --show-bro
 ### Otros comandos
 
 ```bash
-uv run video-downloader status            # ¿hay sesión activa? (Platzi)
-uv run video-downloader logout            # cerrar sesión guardada
-uv run video-downloader clear-cache       # borrar la caché de estructura de cursos
+evdownloader setup          # instala Chromium de Playwright (solo Platzi)
+evdownloader status         # ¿hay sesión activa? (Platzi)
+evdownloader logout         # cerrar sesión guardada
+evdownloader clear-cache    # borrar la caché de estructura de cursos
+```
+
+## Desarrollo
+
+```bash
+git clone https://github.com/EduardoVeraE/evDownloader
+cd evDownloader
+uv sync --extra dev
+uv run playwright install chromium   # solo si vas a probar Platzi
+
+# Calidad
+uv run ruff check src/ tests/
+uv run mypy src/evdownloader
+uv run python -m pytest
 ```
 
 ## Arquitectura
 
 | Capa | Módulo | Responsabilidad |
 |---|---|---|
-| CLI | `cli.py` | Comandos `login`, `logout`, `download`, `status`, `clear-cache` |
+| CLI | `cli.py` | Comandos `login`, `logout`, `download`, `status`, `clear-cache`, `setup` |
 | Sesión | `session.py`, `browser.py` | Login manual y cookies persistentes (Platzi) |
 | Extractores | `extractors/` | Estructura del curso + resolución de video por plataforma |
 | Descarga | `downloaders/` | `ytdlp` (por defecto) y `native` (rnet + FFmpeg) |

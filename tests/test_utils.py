@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from video_downloader.downloaders.base import Downloader
-from video_downloader.utils import numbered, slugify
+from evdownloader.downloaders.base import Downloader
+from evdownloader.utils import numbered, slugify
 
 
 def test_slugify_translitera_acentos() -> None:
