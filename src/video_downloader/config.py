@@ -60,7 +60,7 @@ LOGIN_TIMEOUT_S = 180
 class Settings:
     """Ajustes de una ejecución concreta de descarga."""
 
-    download_dir: Path = field(default_factory=lambda: Path.cwd() / "Courses")
+    download_dir: Path = field(default_factory=lambda: Path.cwd() / "downloads")
     quality: str | None = None  # "1080", "720"... None = máxima disponible
     overwrite: bool = False
     downloader: str = "ytdlp"  # "ytdlp" (por defecto) | "native"

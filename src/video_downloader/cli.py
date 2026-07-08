@@ -46,7 +46,10 @@ def download(
         None, "-q", "--quality", help="Calidad máxima: 1080, 720... (def: máxima)."
     ),
     output: Path = typer.Option(
-        Path.cwd() / "Courses", "-o", "--output", help="Directorio de salida."
+        Path.cwd() / "downloads",
+        "-o",
+        "--output",
+        help="Directorio de salida (se organiza en <output>/<Plataforma>/<curso>).",
     ),
     downloader: str = typer.Option(
         "ytdlp", "-d", "--downloader", help="Motor: ytdlp (def) o native."

@@ -8,6 +8,7 @@ build/
 
 # Proyecto
 Courses/
+downloads/
 *.mp4
 *.vtt
 .mypy_cache/

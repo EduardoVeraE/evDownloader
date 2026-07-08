@@ -56,7 +56,9 @@ async def _run_download(
         f"{len(course.chapters)} capítulos"
     )
 
-    course_dir = safe_mkdir(settings.download_dir / slugify(course.title))
+    # Organizar por plataforma: <download_dir>/<Plataforma>/<curso>.
+    platform_dir = extractor.name.capitalize()
+    course_dir = safe_mkdir(settings.download_dir / platform_dir / slugify(course.title))
 
     downloaded = 0
     for chapter in course.chapters:

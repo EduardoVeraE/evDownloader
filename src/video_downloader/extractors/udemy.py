@@ -24,7 +24,7 @@ import asyncio
 import json
 import re
 from typing import Any
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import rnet
 from playwright.async_api import BrowserContext
@@ -82,7 +82,10 @@ class UdemyExtractor(Extractor):
                 "(chrome, brave, safari...) para autenticar la sesión."
             )
         info = await asyncio.to_thread(self._extract_flat, url)
-        return self._build_course(url, info)
+        # yt-dlp suele devolver un título genérico ("Curso"); pedir el real a la API.
+        course_id = self._course_id_from(url, info)
+        title = await self._fetch_course_title(course_id) if course_id else None
+        return self._build_course(url, info, title_override=title)
 
     def _extract_flat(self, url: str) -> dict[str, Any]:
         """Extrae la estructura del curso con yt-dlp en modo flat (sin resolver)."""
@@ -92,9 +95,11 @@ class UdemyExtractor(Extractor):
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False) or {}
 
-    def _build_course(self, url: str, info: dict[str, Any]) -> Course:
+    def _build_course(
+        self, url: str, info: dict[str, Any], *, title_override: str | None = None
+    ) -> Course:
         """Agrupa las lecciones (planas) de yt-dlp en capítulos."""
-        title = (info.get("title") or "Curso").strip()
+        title = (title_override or info.get("title") or "Curso").strip()
         chapters: list[Chapter] = []
         seen: set[str] = set()
         unit_index = 0
@@ -207,6 +212,32 @@ class UdemyExtractor(Extractor):
                     )
                 )
         return resources
+
+    @staticmethod
+    def _course_id_from(url: str, info: dict[str, Any]) -> str | None:
+        """Obtiene el course_id del query de la URL o del smuggle de una clase."""
+        qs = parse_qs(urlsplit(url).query).get("course_id")
+        if qs:
+            return qs[0]
+        for entry in info.get("entries", []) or []:
+            course_id, _ = UdemyExtractor._ids_from_url(entry.get("url") or "")
+            if course_id:
+                return course_id
+        return None
+
+    async def _fetch_course_title(self, course_id: str) -> str | None:
+        url = f"https://www.udemy.com/api-2.0/courses/{course_id}/?fields[course]=title"
+        headers = {
+            "Cookie": self._udemy_cookie_header(),
+            "Referer": "https://www.udemy.com/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            resp = await self._rnet_client().get(url, headers=headers)
+            data = json.loads(await resp.text())
+        except Exception:  # noqa: BLE001
+            return None
+        return (data.get("title") or "").strip() or None
 
     async def _fetch_supplementary(self, course_id: str, lecture_id: str) -> list[dict[str, Any]]:
         url = (

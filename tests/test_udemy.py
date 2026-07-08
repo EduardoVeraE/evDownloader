@@ -80,6 +80,31 @@ def test_build_course_agrupa_por_capitulo_e_indexa() -> None:
     assert all(u.type is UnitType.VIDEO for ch in course.chapters for u in ch.units)
 
 
+def test_build_course_usa_titulo_override() -> None:
+    course = UdemyExtractor()._build_course(
+        "https://www.udemy.com/course/x/", _FLAT_INFO, title_override="Título Real"
+    )
+    assert course.title == "Título Real"
+
+
+def test_course_id_from_query() -> None:
+    url = "https://www.udemy.com/course-dashboard-redirect/?course_id=3548542"
+    assert UdemyExtractor._course_id_from(url, {}) == "3548542"
+
+
+def test_course_id_from_smuggle_de_entradas() -> None:
+    # Sin query course_id: se toma del smuggle de la primera clase.
+    info = {
+        "entries": [
+            {
+                "url": "https://www.udemy.com/course/x/learn/lecture/1"
+                "#__youtubedl_smuggle=%7B%22course_id%22%3A+%2299%22%7D"
+            }
+        ]
+    }
+    assert UdemyExtractor._course_id_from("https://www.udemy.com/course/x/", info) == "99"
+
+
 def test_build_course_deduplica_urls() -> None:
     info = {
         "title": "C",
