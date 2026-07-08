@@ -44,6 +44,14 @@ class YtDlpDownloader(Downloader):
             "outtmpl": outtmpl,
             "format": self._format_selector(settings.quality),
             "merge_output_format": "mp4",
+            # ``merge_output_format`` solo normaliza el contenedor cuando hay que
+            # muxear video+audio separados. Un formato progresivo único conserva
+            # la extensión que le asigna el extractor (BunnyCDN de Codigofacilito
+            # etiqueta su "source" —un MP4 válido— como ``.json``). El postprocesador
+            # ``FFmpegVideoRemuxer`` fuerza el contenedor final a mp4 sin recodificar;
+            # si ya es mp4, yt-dlp lo omite (no afecta a Platzi/Udemy). Se declara
+            # explícitamente porque la opción ``remux_video`` solo la traduce el CLI.
+            "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
             "http_headers": source.http_headers,
             "concurrent_fragment_downloads": settings.concurrency,
             "retries": 5,

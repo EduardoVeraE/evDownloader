@@ -13,7 +13,7 @@ from .config import Settings, ensure_dirs
 
 app = typer.Typer(
     name="video-downloader",
-    help="Descargador de cursos de video (Platzi, Udemy).",
+    help="Descargador de cursos de video (Platzi, Udemy, Codigofacilito).",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -69,7 +69,8 @@ def download(
     cookies_from_browser: str | None = typer.Option(
         None,
         "--cookies-from-browser",
-        help="Navegador del que leer cookies (chrome, brave, safari...). Requerido para Udemy.",
+        help="Navegador del que leer cookies (chrome, brave, safari...). "
+        "Requerido para Udemy y Codigofacilito.",
     ),
     sub_langs: str = typer.Option(
         "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."

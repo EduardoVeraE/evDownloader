@@ -8,10 +8,15 @@ plataforma para poder añadir nuevas sin reescribirlo.
 from __future__ import annotations
 
 from .base import Extractor
+from .codigofacilito import CodigofacilitoExtractor
 from .platzi import PlatziExtractor
 from .udemy import UdemyExtractor
 
-_EXTRACTORS: list[type[Extractor]] = [PlatziExtractor, UdemyExtractor]
+_EXTRACTORS: list[type[Extractor]] = [
+    PlatziExtractor,
+    UdemyExtractor,
+    CodigofacilitoExtractor,
+]
 _BY_NAME: dict[str, type[Extractor]] = {cls.name: cls for cls in _EXTRACTORS}
 
 
@@ -33,6 +38,7 @@ def get_extractor_by_name(name: str) -> Extractor:
 
 
 __all__ = [
+    "CodigofacilitoExtractor",
     "Extractor",
     "PlatziExtractor",
     "UdemyExtractor",
