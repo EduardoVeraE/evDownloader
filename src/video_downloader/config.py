@@ -52,6 +52,10 @@ MEDIASTREAM_HOSTS = ("mdstrm.com",)
 UDEMY_BASE_URL = "https://www.udemy.com"
 UDEMY_LOGIN_URL = "https://www.udemy.com/join/login-popup/"
 
+# --- Endpoints / dominios de Codigofacilito ---------------------------------
+CODIGOFACILITO_BASE_URL = "https://codigofacilito.com"
+CODIGOFACILITO_LOGIN_URL = "https://codigofacilito.com/login"
+
 # Tiempo máximo (segundos) para que el usuario inicie sesión manualmente.
 LOGIN_TIMEOUT_S = 180
 
