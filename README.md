@@ -4,14 +4,6 @@ Descargador de cursos de video para **Platzi**, **Udemy** y **Codigofacilito**.
 Diseño extensible por *extractores* (una plataforma = un extractor) y motor de
 descarga **híbrido** sobre yt-dlp.
 
-## Por qué existe
-
-El proyecto se inspira en [`ivansaul/platzi-downloader`](https://github.com/ivansaul/platzi-downloader),
-que dejó de funcionar cuando Platzi migró la entrega de video a **Mediastream
-(`mdstrm.com`)**: la URL del playlist HLS ya no está en el HTML, se genera con
-tokens. Se resuelve interceptando la petición real del reproductor (Playwright) y
-manteniendo una **identidad coherente** entre navegación y descarga (evita los `403`).
-
 ## Plataformas soportadas
 
 Cada plataforma se autentica de una de dos formas, según su anti-bot:
