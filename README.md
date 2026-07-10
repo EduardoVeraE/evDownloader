@@ -32,8 +32,15 @@ pipx install evdownloader
 
 Esto deja disponibles los comandos `evdownloader` y su alias corto `evd`.
 
+> **No uses `pip install evdownloader`.** En macOS/Linux con Python de Homebrew falla
+> con `error: externally-managed-environment` (PEP 668), y `pip` global no es la vía
+> correcta para una CLI. `uv tool` y `pipx` aíslan la app en su propio entorno. Si te
+> falta pipx: `brew install pipx`. Evita `--break-system-packages`: puede dañar tu
+> instalación de Homebrew.
+
 ### Prerrequisitos
 
+- **Python 3.14+** — `uv tool` lo instala solo; con `pipx` debes tenerlo ya.
 - **FFmpeg** en el `PATH` (muxeo y HLS):
 
   ```bash
@@ -155,13 +162,6 @@ Hay **dos patrones de extractor**: navegador (Platzi, intercepta la red con
 Playwright) y delegación en yt-dlp + cookies del navegador (Udemy, Codigofacilito,
 sin navegador automatizado). Añadir una plataforma es escribir un extractor nuevo;
 el núcleo es agnóstico.
-
-## Notas de compatibilidad (Python 3.14)
-
-`yt-dlp`, `pydantic` (>=2.12), `rnet` (>=2.4.2) y `greenlet` (>=3.5.1) publican
-wheels para 3.14. `playwright` 1.60 aún no lo clasifica oficialmente pero funciona
-en la práctica (su única dependencia C, `greenlet`, ya lo soporta). Si surgiera un
-problema, el plan de respaldo es migrar el navegado a `nodriver`.
 
 ## Aviso legal
 
