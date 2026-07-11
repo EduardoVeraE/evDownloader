@@ -75,6 +75,19 @@ def download(
     sub_langs: str = typer.Option(
         "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."
     ),
+    use_drm: bool = typer.Option(
+        False, "--use-drm/--no-use-drm", help="Habilitar descifrado DRM si se detecta contenido protegido."
+    ),
+    drm_license_server: str | None = typer.Option(
+        None,
+        "--drm-license-server",
+        help="Override de la URL de la license server DRM.",
+    ),
+    drm_token: str | None = typer.Option(
+        None,
+        "--drm-token",
+        help="Token de autorización para la license server DRM.",
+    ),
     show_browser: bool = typer.Option(
         False, "--show-browser", help="Mostrar el navegador (no headless)."
     ),
@@ -93,6 +106,9 @@ def download(
         resources=not no_resources,
         cookies_from_browser=cookies_from_browser,
         sub_langs=sub_langs,
+        use_drm=use_drm,
+        drm_license_server=drm_license_server,
+        drm_token=drm_token,
     )
     asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
 

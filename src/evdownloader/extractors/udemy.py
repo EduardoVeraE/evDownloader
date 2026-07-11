@@ -1,18 +1,24 @@
-"""Extractor de Udemy — delega en los extractores nativos de yt-dlp.
+"""Extractor de Udemy — enumera vía la API 2.0 y descarga con yt-dlp.
 
 Udemy está detrás de Cloudflare Turnstile, que detecta el CDP de cualquier
 navegador automatizado (Playwright) y entra en un loop de verificación. Por eso
-NO se navega Udemy con un navegador: se delega en los extractores nativos de
-yt-dlp (``udemy`` / ``udemy:course``), que hablan con la API de Udemy usando las
-cookies del navegador REAL del usuario (``--cookies-from-browser``), donde ya
-pasó Cloudflare como humano.
+NO se navega Udemy con un navegador: se usan las cookies del navegador REAL del
+usuario (``--cookies-from-browser``), donde ya pasó Cloudflare como humano.
 
-Flujo:
-* ``list_course``: yt-dlp en modo *flat* devuelve la lista de lecciones con su
-  capítulo; se agrupan en ``Course``.
-* ``resolve_video``: no navega; devuelve un ``VideoSource`` que apunta a la URL
-  de la lección para que el downloader (yt-dlp) la resuelva y descargue con las
-  cookies del navegador (``settings.cookies_from_browser``).
+Por qué NO se delega el listado en ``udemy:course`` de yt-dlp: ese extractor
+saca el ``course_id`` de la página con regex (``data-course-id``...). Udemy está
+migrando las páginas de curso a React Server Components y esos patrones ya no
+matchean, así que ``udemy:course`` falla con ``Unable to extract course id``.
+
+Flujo (independiente del HTML del curso):
+* ``list_course``: resuelve el ``course_id`` (query o página, cubriendo markup
+  viejo y nuevo) y enumera el currículum con la API 2.0
+  (``cached-subscriber-curriculum-items``) — el mismo endpoint que yt-dlp usa
+  internamente. Cada lección se emite como una URL "smuggleada" con el
+  ``course_id``, idéntica a la que produce yt-dlp.
+* ``resolve_video``: no navega; devuelve un ``VideoSource`` que apunta a esa URL
+  para que el downloader (yt-dlp) la resuelva. Como el ``course_id`` viaja
+  smuggleado, yt-dlp NO vuelve a scrapear el HTML: lo lee del fragmento.
 
 DRM: yt-dlp reporta las lecciones protegidas como sin formatos descargables; el
 núcleo lo registra como fallo de esa clase y continúa con el resto.
@@ -20,11 +26,10 @@ núcleo lo registra como fallo de esa clase y continúa con el resto.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, unquote_plus, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlencode, urlsplit
 
 import rnet
 from playwright.async_api import BrowserContext
@@ -45,8 +50,15 @@ from .base import Extractor
 _LECTURE_ID_RE = re.compile(r"/lecture/(\d+)")
 # course_id viaja "smuggleado" por yt-dlp en el fragmento de la URL de la clase.
 _COURSE_ID_RE = re.compile(r'"course_id":\s*"?(\d+)"?')
-# Valor con que yt-dlp marca las clases sueltas sin sección nombrada.
-_UNNAMED_CHAPTER = "Undefined"
+# Patrones para hallar el course_id en la página del curso. Se cubren el markup
+# clásico (data-course-id / courseId) y el nuevo (RSC), donde el id sólo aparece
+# en el deeplink "udemy://discover?courseId=6905411".
+_COURSE_ID_PAGE_RES = (
+    re.compile(r'data-course-id=["\'](\d+)'),
+    re.compile(r"&quot;courseId&quot;\s*:\s*(\d+)"),
+    re.compile(r'"courseId"\s*:\s*(\d+)'),
+    re.compile(r"courseId=(\d+)"),
+)
 
 
 class UdemyExtractor(Extractor):
@@ -68,12 +80,6 @@ class UdemyExtractor(Extractor):
     def supports(url: str) -> bool:
         return "udemy.com" in url
 
-    def _ydl_opts(self, **extra: Any) -> dict[str, Any]:
-        opts: dict[str, Any] = {"quiet": True, "no_warnings": True, **extra}
-        if self._cookies_from_browser:
-            opts["cookiesfrombrowser"] = (self._cookies_from_browser, None, None, None)
-        return opts
-
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
         if not self._cookies_from_browser:
@@ -81,56 +87,114 @@ class UdemyExtractor(Extractor):
                 "Udemy requiere --cookies-from-browser <navegador> "
                 "(chrome, brave, safari...) para autenticar la sesión."
             )
-        info = await asyncio.to_thread(self._extract_flat, url)
-        # yt-dlp suele devolver un título genérico ("Curso"); pedir el real a la API.
-        course_id = self._course_id_from(url, info)
-        title = await self._fetch_course_title(course_id) if course_id else None
-        return self._build_course(url, info, title_override=title)
+        course_id = await self._resolve_course_id(url)
+        if not course_id:
+            raise ValueError(
+                "No se pudo determinar el course_id de Udemy. Verifica la URL "
+                "del curso y que la sesión del navegador esté activa."
+            )
+        items = await self._fetch_curriculum(course_id)
+        title = await self._fetch_course_title(course_id)
+        return self._build_course(url, course_id, items, title_override=title)
 
-    def _extract_flat(self, url: str) -> dict[str, Any]:
-        """Extrae la estructura del curso con yt-dlp en modo flat (sin resolver)."""
-        import yt_dlp
+    async def _resolve_course_id(self, url: str) -> str | None:
+        """Obtiene el course_id del query de la URL o de la página del curso.
 
-        opts = self._ydl_opts(extract_flat="in_playlist", skip_download=True)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False) or {}
+        La página se parsea con patrones que cubren el markup clásico y el nuevo
+        (RSC), de modo que no dependemos del regex roto de yt-dlp.
+        """
+        qs = parse_qs(urlsplit(url).query).get("course_id")
+        if qs:
+            return qs[0]
+        html = await self._fetch_text(url)
+        for pattern in _COURSE_ID_PAGE_RES:
+            m = pattern.search(html)
+            if m:
+                return m.group(1)
+        return None
+
+    async def _fetch_curriculum(self, course_id: str) -> list[dict[str, Any]]:
+        """Enumera capítulos y lecciones con la API 2.0 (paginando si hace falta)."""
+        params = urlencode(
+            {
+                "page_size": "1000",
+                "fields[chapter]": "title,object_index",
+                "fields[lecture]": "title,asset",
+                "fields[asset]": "asset_type",
+            }
+        )
+        url: str | None = (
+            f"https://www.udemy.com/api-2.0/courses/{course_id}"
+            f"/cached-subscriber-curriculum-items/?{params}"
+        )
+        headers = self._api_headers()
+        results: list[dict[str, Any]] = []
+        while url:
+            try:
+                resp = await self._rnet_client().get(url, headers=headers)
+                data = json.loads(await resp.text())
+            except Exception:  # noqa: BLE001
+                break
+            results.extend(data.get("results") or [])
+            url = data.get("next")
+        return results
 
     def _build_course(
-        self, url: str, info: dict[str, Any], *, title_override: str | None = None
+        self,
+        url: str,
+        course_id: str,
+        items: list[dict[str, Any]],
+        *,
+        title_override: str | None = None,
     ) -> Course:
-        """Agrupa las lecciones (planas) de yt-dlp en capítulos."""
-        title = (title_override or info.get("title") or "Curso").strip()
+        """Agrupa el currículum de la API 2.0 en capítulos.
+
+        Cada lección de video se emite como una URL "smuggleada" con el
+        ``course_id`` (formato idéntico al de yt-dlp), para que el downloader la
+        resuelva sin scrapear el HTML del curso.
+        """
+        from yt_dlp.utils import smuggle_url
+
+        title = (title_override or "Curso").strip()
+        # Primer segmento de la ruta ("course"): réplica de UdemyIE._match_id.
+        course_path = urlsplit(url).path.strip("/").split("/")[0] or "course"
         chapters: list[Chapter] = []
-        seen: set[str] = set()
-        unit_index = 0
         current: Chapter | None = None
-        current_key: object = object()  # centinela: fuerza abrir el primer capítulo
+        unit_index = 0
 
-        for entry in info.get("entries", []) or []:
-            entry_url = entry.get("url") or entry.get("webpage_url") or ""
-            if not entry_url or entry_url in seen:
-                continue
-            seen.add(entry_url)
-
-            ch_name = entry.get("chapter")
-            if ch_name == _UNNAMED_CHAPTER:
-                ch_name = None
-            ch_key = entry.get("chapter_number") or ch_name or 0
-            if ch_key != current_key:
-                current_key = ch_key
+        for entry in items:
+            clazz = entry.get("_class")
+            if clazz == "chapter":
                 current = Chapter(
-                    title=(ch_name or f"Sección {len(chapters) + 1}").strip(),
+                    title=(entry.get("title") or f"Sección {len(chapters) + 1}").strip(),
                     index=len(chapters) + 1,
                     units=[],
                 )
                 chapters.append(current)
+                continue
+            if clazz != "lecture":
+                continue
+
+            asset = entry.get("asset") or {}
+            if (asset.get("asset_type") or asset.get("assetType")) != "Video":
+                continue
+            lecture_id = entry.get("id")
+            if not lecture_id:
+                continue
+
+            if current is None:  # lecciones sueltas antes de cualquier capítulo
+                current = Chapter(title="Sección 1", index=1, units=[])
+                chapters.append(current)
 
             unit_index += 1
-            assert current is not None
+            lecture_url = smuggle_url(
+                f"https://www.udemy.com/{course_path}/learn/v4/t/lecture/{lecture_id}",
+                {"course_id": str(course_id)},
+            )
             current.units.append(
                 Unit(
                     title=(entry.get("title") or f"Clase {unit_index}").strip(),
-                    url=entry_url,
+                    url=lecture_url,
                     type=UnitType.VIDEO,
                     index=unit_index,
                 )
@@ -213,27 +277,34 @@ class UdemyExtractor(Extractor):
                 )
         return resources
 
-    @staticmethod
-    def _course_id_from(url: str, info: dict[str, Any]) -> str | None:
-        """Obtiene el course_id del query de la URL o del smuggle de una clase."""
-        qs = parse_qs(urlsplit(url).query).get("course_id")
-        if qs:
-            return qs[0]
-        for entry in info.get("entries", []) or []:
-            course_id, _ = UdemyExtractor._ids_from_url(entry.get("url") or "")
-            if course_id:
-                return course_id
-        return None
+    async def _fetch_text(self, url: str) -> str:
+        """Descarga el HTML de una página de udemy.com con las cookies del navegador.
 
-    async def _fetch_course_title(self, course_id: str) -> str | None:
-        url = f"https://www.udemy.com/api-2.0/courses/{course_id}/?fields[course]=title"
+        ``allow_redirects``: la URL del curso sin ``/`` final responde 301; sin
+        seguir el redirect, rnet devolvería un cuerpo vacío.
+        """
         headers = {
+            "Cookie": self._udemy_cookie_header(),
+            "Referer": "https://www.udemy.com/",
+        }
+        try:
+            resp = await self._rnet_client().get(url, headers=headers, allow_redirects=True)
+            return await resp.text()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _api_headers(self) -> dict[str, str]:
+        """Headers para las llamadas a la API 2.0 (autenticadas por cookies)."""
+        return {
             "Cookie": self._udemy_cookie_header(),
             "Referer": "https://www.udemy.com/",
             "X-Requested-With": "XMLHttpRequest",
         }
+
+    async def _fetch_course_title(self, course_id: str) -> str | None:
+        url = f"https://www.udemy.com/api-2.0/courses/{course_id}/?fields[course]=title"
         try:
-            resp = await self._rnet_client().get(url, headers=headers)
+            resp = await self._rnet_client().get(url, headers=self._api_headers())
             data = json.loads(await resp.text())
         except Exception:  # noqa: BLE001
             return None
@@ -245,13 +316,8 @@ class UdemyExtractor(Extractor):
             f"/lectures/{lecture_id}/?fields[lecture]=supplementary_assets"
             f"&fields[asset]=asset_type,title,filename,download_urls,external_url"
         )
-        headers = {
-            "Cookie": self._udemy_cookie_header(),
-            "Referer": "https://www.udemy.com/",
-            "X-Requested-With": "XMLHttpRequest",
-        }
         try:
-            resp = await self._rnet_client().get(url, headers=headers)
+            resp = await self._rnet_client().get(url, headers=self._api_headers())
             data = json.loads(await resp.text())
         except Exception:  # noqa: BLE001
             return []

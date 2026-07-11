@@ -63,6 +63,20 @@ class Cookie(BaseModel):
     expires: float = 0.0
 
 
+class DrmInfo(BaseModel):
+    """Metadata DRM detectada para un video.
+
+    Almacena la información necesaria para futuras llamadas a la license server
+    y descifrado.  El esquema se identifica con un string normalizado (p. ej.
+    ``"widevine"``, ``"fairplay"``).
+    """
+
+    scheme: str
+    license_url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    token: str | None = None
+
+
 class VideoSource(BaseModel):
     """Fuente de video resuelta, lista para entregar a un downloader.
 
@@ -83,6 +97,8 @@ class VideoSource(BaseModel):
     # Lo usan los extractores que delegan la resolución en yt-dlp (Udemy); los
     # que traen las URLs de subtítulos aparte (Platzi) lo dejan en False.
     write_subs: bool = False
+    # DRM: se rellena cuando el extractor detecta contenido protegido.
+    drm: DrmInfo | None = None
 
 
 class Unit(BaseModel):

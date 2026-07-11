@@ -32,3 +32,19 @@ class Downloader(ABC):
             h = quality.rstrip("p")
             return f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
         return "bv*+ba/b"
+
+    @staticmethod
+    def _hls_format_selector(quality: str | None) -> str:
+        """Selector de formato que solo elige formatos HLS ([protocol^=m3u8]).
+
+        Útil como fallback cuando la descarga directa (progressive) falla,
+        ya que los CDNs de HLS suelen ser más tolerantes a errores de red
+        y expiración de tokens.
+        """
+        if quality:
+            h = quality.rstrip("p")
+            return (
+                f"bv*[protocol^=m3u8][height<={h}]"
+                f"+ba[protocol^=m3u8]/b[protocol^=m3u8]"
+            )
+        return "bv*[protocol^=m3u8]+ba[protocol^=m3u8]/b[protocol^=m3u8]"

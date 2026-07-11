@@ -90,6 +90,7 @@ evdownloader download \
 La salida se organiza sola en `downloads/<Plataforma>/<curso>/<NN-módulo>/<NN-clase>.mp4`.
 
 ## Ejemplos
+ Usa el comando `evdownload` o su alias `evd`
 
 ```bash
 # Platzi, calidad máxima 1080p, en un directorio concreto
@@ -100,11 +101,11 @@ evd download "https://codigofacilito.com/cursos/git-profesional" \
   --cookies-from-browser chrome --limit 5
 
 # Udemy, sin descargar recursos/adjuntos y forzando re-descarga
-evdownloader download "https://www.udemy.com/course/<curso>/" \
+evd download "https://www.udemy.com/course/<curso>/" \
   --cookies-from-browser brave --no-resources --overwrite
 
 # Solo subtítulos en español e inglés (plataformas que delegan subs en yt-dlp)
-evdownloader download "<url>" --cookies-from-browser brave --sub-langs es,en
+evd download "<url>" --cookies-from-browser brave --sub-langs es,en
 
 # Ver el navegador durante el login/descarga de Platzi (depuración)
 evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
@@ -132,20 +133,6 @@ evdownloader setup          # instala Chromium de Playwright (solo Platzi)
 evdownloader status         # ¿hay sesión activa? (Platzi)
 evdownloader logout         # cerrar sesión guardada
 evdownloader clear-cache    # borrar la caché de estructura de cursos
-```
-
-## Desarrollo
-
-```bash
-git clone https://github.com/EduardoVeraE/evDownloader
-cd evDownloader
-uv sync --extra dev
-uv run playwright install chromium   # solo si vas a probar Platzi
-
-# Calidad
-uv run ruff check src/ tests/
-uv run mypy src/evdownloader
-uv run python -m pytest
 ```
 
 ## Arquitectura

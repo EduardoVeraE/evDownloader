@@ -18,9 +18,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from rich.console import Console
+
 from ..config import Settings
 from ..models import Cookie, VideoSource
 from .base import Downloader
+
+console = Console()
 
 # Cookies de sesión (sin expiración fija) escritas con esta expiración lejana
 # para que yt-dlp no las descarte al cargar el cookiefile.
@@ -40,9 +44,8 @@ class YtDlpDownloader(Downloader):
         dest.parent.mkdir(parents=True, exist_ok=True)
         outtmpl = str(dest.with_suffix("")) + ".%(ext)s"
 
-        opts: dict = {
+        base_opts: dict = {
             "outtmpl": outtmpl,
-            "format": self._format_selector(settings.quality),
             "merge_output_format": "mp4",
             # ``merge_output_format`` solo normaliza el contenedor cuando hay que
             # muxear video+audio separados. Un formato progresivo único conserva
@@ -65,28 +68,50 @@ class YtDlpDownloader(Downloader):
         if source.write_subs:
             # yt-dlp extrae los subtítulos junto al video (Udemy). Se escriben
             # como <nombre>.<lang>.vtt junto al .mp4, con el mismo outtmpl.
-            opts["writesubtitles"] = True
-            opts["subtitleslangs"] = [x for x in settings.sub_langs.split(",") if x]
-            opts["subtitlesformat"] = "vtt/best"
+            base_opts["writesubtitles"] = True
+            base_opts["subtitleslangs"] = [x for x in settings.sub_langs.split(",") if x]
+            base_opts["subtitlesformat"] = "vtt/best"
 
         cookiefile: str | None = None
         try:
             if source.cookie_jar:
                 cookiefile = self._write_cookiefile(source.cookie_jar)
-                opts["cookiefile"] = cookiefile
+                base_opts["cookiefile"] = cookiefile
             elif settings.cookies_from_browser:
                 # yt-dlp lee las cookies directamente del navegador real del
                 # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
-                opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
+                base_opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
             elif source.cookies:
                 # Respaldo si no hay cookies completas: header (deprecado).
-                opts["http_headers"] = {
+                base_opts["http_headers"] = {
                     **source.http_headers,
                     "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
                 }
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([source.url])
+            # --- Cadena de formatos: progressive primero, HLS como fallback ---
+            primary_fmt = self._format_selector(settings.quality)
+            hls_fmt = self._hls_format_selector(settings.quality)
+
+            formats_to_try: list[tuple[str, str]] = [(primary_fmt, "directa")]
+            if hls_fmt != primary_fmt:
+                formats_to_try.append((hls_fmt, "HLS"))
+
+            last_error: Exception | None = None
+            for fmt, label in formats_to_try:
+                if label != "directa":
+                    console.print(f"[yellow]  ↻ Fallback a descarga {label}...[/yellow]")
+                try:
+                    opts = {**base_opts, "format": fmt}
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([source.url])
+                    last_error = None
+                    break
+                except yt_dlp.utils.DownloadError as exc:
+                    last_error = exc
+                    continue
+
+            if last_error is not None:
+                raise last_error
         finally:
             if cookiefile and os.path.exists(cookiefile):
                 os.remove(cookiefile)

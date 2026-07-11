@@ -1,9 +1,10 @@
-"""Tests de las funciones puras del extractor de Udemy (delegación a yt-dlp).
+"""Tests de las funciones puras del extractor de Udemy (enumeración por API 2.0).
 
 Cubren, sin red ni yt-dlp real:
 * ``supports`` / registro / ``needs_browser``.
 * ``configure`` propaga el navegador de cookies.
-* ``_build_course`` agrupa las entradas planas de yt-dlp en capítulos.
+* ``_build_course`` agrupa el currículum de la API 2.0 en capítulos y emite las
+  URLs "smuggleadas" con el course_id.
 * ``list_course`` exige ``--cookies-from-browser``.
 * ``resolve_video`` devuelve la URL de la lección para que la resuelva yt-dlp.
 * Separación de sesión por plataforma (``config.session_file``).
@@ -19,25 +20,22 @@ from evdownloader.extractors.udemy import UdemyExtractor
 from evdownloader.models import ResourceKind, Unit, UnitType
 
 
-# Fixture con el formato que produce yt-dlp en modo flat (--flat-playlist).
-def _entry(id_: str, title: str, chapter: str, chapter_number: int) -> dict:
-    return {
-        "id": id_,
-        "title": title,
-        "url": f"https://www.udemy.com/x/lecture/{id_}",
-        "chapter": chapter,
-        "chapter_number": chapter_number,
-    }
+# Fixtures con el formato de cached-subscriber-curriculum-items de la API 2.0.
+def _chapter(title: str, index: int) -> dict:
+    return {"_class": "chapter", "title": title, "object_index": index}
 
 
-_FLAT_INFO = {
-    "title": "Curso de Azure",
-    "entries": [
-        _entry("1", "Intro", "Sobre el curso", 1),
-        _entry("2", "Bienvenida", "Sobre el curso", 1),
-        _entry("3", "Crear cuenta", "Introducción", 2),
-    ],
-}
+def _lecture(id_: str, title: str, asset_type: str = "Video") -> dict:
+    return {"_class": "lecture", "id": id_, "title": title, "asset": {"asset_type": asset_type}}
+
+
+_CURRICULUM = [
+    _chapter("Sobre el curso", 1),
+    _lecture("1", "Intro"),
+    _lecture("2", "Bienvenida"),
+    _chapter("Introducción", 2),
+    _lecture("3", "Crear cuenta"),
+]
 
 
 # -- Enrutado / capacidades ---------------------------------------------------
@@ -65,75 +63,60 @@ def test_configure_propaga_navegador_de_cookies() -> None:
     assert ex._cookies_from_browser == "brave"
 
 
-# -- Construcción del curso desde entradas planas de yt-dlp -------------------
+# -- Construcción del curso desde el currículum de la API 2.0 ----------------
 def test_build_course_agrupa_por_capitulo_e_indexa() -> None:
-    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", _FLAT_INFO)
+    course = UdemyExtractor()._build_course(
+        "https://www.udemy.com/course/x/", "42", _CURRICULUM, title_override="Curso de Azure"
+    )
 
     assert course.title == "Curso de Azure"
     assert [c.title for c in course.chapters] == ["Sobre el curso", "Introducción"]
     assert [c.index for c in course.chapters] == [1, 2]
     # Índices globales de unidad, consecutivos entre capítulos.
     assert [u.index for ch in course.chapters for u in ch.units] == [1, 2, 3]
-    assert course.chapters[0].units[0].url == "https://www.udemy.com/x/lecture/1"
     assert course.chapters[1].units[0].title == "Crear cuenta"
-    # Todas las unidades se tratan como video (yt-dlp omite las que no lo son).
+    # Todas las unidades son video (las no-video se omiten).
     assert all(u.type is UnitType.VIDEO for ch in course.chapters for u in ch.units)
 
 
-def test_build_course_usa_titulo_override() -> None:
+def test_build_course_emite_url_smuggleada_con_course_id() -> None:
     course = UdemyExtractor()._build_course(
-        "https://www.udemy.com/course/x/", _FLAT_INFO, title_override="Título Real"
+        "https://www.udemy.com/course/x/", "42", _CURRICULUM
     )
-    assert course.title == "Título Real"
+    url = course.chapters[0].units[0].url
+    # yt-dlp lee el course_id del smuggle y no scrapea el HTML del curso.
+    assert "/course/learn/v4/t/lecture/1" in url
+    assert UdemyExtractor._ids_from_url(url) == ("42", "1")
 
 
-def test_course_id_from_query() -> None:
-    url = "https://www.udemy.com/course-dashboard-redirect/?course_id=3548542"
-    assert UdemyExtractor._course_id_from(url, {}) == "3548542"
+def test_build_course_titulo_por_defecto() -> None:
+    # Sin override (título de la API vacío) cae a "Curso".
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", _CURRICULUM)
+    assert course.title == "Curso"
 
 
-def test_course_id_from_smuggle_de_entradas() -> None:
-    # Sin query course_id: se toma del smuggle de la primera clase.
-    info = {
-        "entries": [
-            {
-                "url": "https://www.udemy.com/course/x/learn/lecture/1"
-                "#__youtubedl_smuggle=%7B%22course_id%22%3A+%2299%22%7D"
-            }
-        ]
-    }
-    assert UdemyExtractor._course_id_from("https://www.udemy.com/course/x/", info) == "99"
-
-
-def test_build_course_deduplica_urls() -> None:
-    info = {
-        "title": "C",
-        "entries": [
-            _entry("1", "A", "S", 1),
-            _entry("1", "A dup", "S", 1),  # misma url -> dedup
-        ],
-    }
-    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", info)
+def test_build_course_omite_lecciones_no_video() -> None:
+    items = [
+        _chapter("S", 1),
+        _lecture("1", "Video", "Video"),
+        _lecture("2", "Artículo", "Article"),  # se omite
+    ]
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", items)
     assert sum(len(c.units) for c in course.chapters) == 1
+    assert course.chapters[0].units[0].title == "Video"
 
 
-def test_build_course_sin_entries() -> None:
-    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", {"title": "C"})
+def test_build_course_sin_items() -> None:
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", [])
     assert course.chapters == []
 
 
-def test_build_course_normaliza_capitulo_undefined() -> None:
-    # yt-dlp marca las clases sueltas (sin sección) con chapter="Undefined".
-    info = {
-        "title": "C",
-        "entries": [
-            _entry("1", "Suelta", "Undefined", 1),
-            _entry("2", "En sección", "Módulo 1", 2),
-        ],
-    }
-    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", info)
-    assert course.chapters[0].title == "Sección 1"  # no "Undefined"
-    assert course.chapters[1].title == "Módulo 1"
+def test_build_course_leccion_suelta_sin_capitulo() -> None:
+    # Lección antes de cualquier capítulo -> se crea "Sección 1".
+    items = [_lecture("1", "Suelta")]
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", items)
+    assert course.chapters[0].title == "Sección 1"
+    assert len(course.chapters[0].units) == 1
 
 
 # -- list_course exige cookies del navegador ---------------------------------
