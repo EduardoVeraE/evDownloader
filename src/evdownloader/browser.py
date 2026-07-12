@@ -89,8 +89,15 @@ async def browser_context(
     if with_session and platform is None:
         raise ValueError("browser_context requiere 'platform' cuando with_session=True")
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless)
-        context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
+        browser = await pw.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = await browser.new_context(
+            user_agent=DEFAULT_USER_AGENT,
+            viewport={"width": 1920, "height": 1080},
+            locale="es-ES",
+        )
         if with_session and platform is not None:
             cookies = load_cookies(platform)
             if cookies:

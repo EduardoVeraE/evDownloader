@@ -19,7 +19,8 @@ app = typer.Typer(
 )
 console = Console()
 
-_PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy.")
+_PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy | codigofacilito.")
+_PLATFORMS = ("platzi", "udemy", "codigofacilito")
 
 
 @app.command()
@@ -76,7 +77,9 @@ def download(
         "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."
     ),
     use_drm: bool = typer.Option(
-        False, "--use-drm/--no-use-drm", help="Habilitar descifrado DRM si se detecta contenido protegido."
+        False,
+        "--use-drm/--no-use-drm",
+        help="Habilitar descifrado DRM si se detecta contenido protegido.",
     ),
     drm_license_server: str | None = typer.Option(
         None,
@@ -87,6 +90,11 @@ def download(
         None,
         "--drm-token",
         help="Token de autorización para la license server DRM.",
+    ),
+    drm_device: Path | None = typer.Option(
+        None,
+        "--drm-device",
+        help="Ruta al archivo .wvd del dispositivo Widevine para descifrado DRM.",
     ),
     show_browser: bool = typer.Option(
         False, "--show-browser", help="Mostrar el navegador (no headless)."
@@ -109,6 +117,7 @@ def download(
         use_drm=use_drm,
         drm_license_server=drm_license_server,
         drm_token=drm_token,
+        drm_device=drm_device,
     )
     asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
 
@@ -121,22 +130,114 @@ def clear_cache() -> None:
 
 
 @app.command()
-def status(platform: str = _PLATFORM_ARG) -> None:
-    """Muestra si hay una sesión activa en la plataforma."""
-    logged = asyncio.run(session.is_logged_in(platform))
-    if logged:
-        console.print("[green]Sesión activa.[/green]")
-    else:
-        console.print(
-            f"[yellow]Sin sesión. Ejecuta 'evdownloader login {platform}'.[/yellow]"
+def drm_proof(
+    input: Path = typer.Argument(..., help="Ruta al archivo .mp4 cifrado."),
+    output: Path = typer.Argument(..., help="Ruta de salida para el .mp4 descifrado."),
+    device: Path = typer.Option(
+        ..., "--device", help="Ruta al archivo .wvd del dispositivo Widevine."
+    ),
+    license_url: str = typer.Option(
+        ..., "--license-url", help="URL de la license server Widevine."
+    ),
+    pssh: str = typer.Option(..., "--pssh", help="PSSH Widevine (base64)."),
+    token: str | None = typer.Option(
+        None, "--token", help="Token de autorización para la license server DRM."
+    ),
+    key_id: str | None = typer.Option(None, "--key-id", help="Key ID (hex) del contenido."),
+    header: list[str] = typer.Option(
+        [],
+        "--header",
+        help="Headers HTTP adicionales en formato 'Nombre: Valor' (repetible).",
+    ),
+) -> None:
+    """Descifra un archivo MP4 cifrado con Widevine usando un dispositivo .wvd."""
+    ensure_dirs()
+    from .drm import (
+        LicenseInputError,
+        ProofError,
+        normalize_widevine_license_input,
+        prove_decrypt_path,
+    )
+    from .drm.license import post_license_challenge
+    from .models import DrmInfo
+
+    # Parse headers from "Name: Value" format.
+    headers: dict[str, str] = {}
+    for h in header:
+        if ":" not in h:
+            console.print(f"[red]Header inválido (falta ':'): {h}[/red]")
+            raise typer.Exit(code=1)
+        name, value = h.split(":", 1)
+        headers[name.strip()] = value.strip()
+
+    # Build DrmInfo for the normalizer.
+    drm = DrmInfo(
+        scheme="widevine",
+        license_url=license_url,
+        pssh=pssh,
+        token=token,
+        key_id=key_id,
+        headers=headers,
+    )
+
+    try:
+        license_input = normalize_widevine_license_input(drm)
+    except LicenseInputError as exc:
+        console.print(f"[red]Entrada DRM inválida: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    # Validate inputs.
+    if not input.is_file():
+        console.print(f"[red]Archivo de entrada no encontrado: {input}[/red]")
+        raise typer.Exit(code=1)
+    if not device.is_file():
+        console.print(f"[red]Archivo de dispositivo no encontrado: {device}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[cyan]Entrada:[/cyan] {license_input.safe_summary()}")
+
+    try:
+        result = asyncio.run(
+            prove_decrypt_path(
+                license_input=license_input,
+                device_path=device,
+                encrypted_path=input,
+                output_path=output,
+                license_post=post_license_challenge,
+            )
         )
+    except ProofError as exc:
+        console.print(f"[red]Fallo en el descifrado DRM: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    console.print(f"[green]Descifrado completado: {result.output_path}[/green]")
+
+
+@app.command()
+def status(
+    platform: str | None = typer.Argument(
+        None, help="Plataforma: platzi | udemy | codigofacilito. Si se omite, muestra todas."
+    ),
+) -> None:
+    """Muestra si hay una sesión activa en una o todas las plataformas."""
+    platforms = (platform,) if platform else _PLATFORMS
+    for name in platforms:
+        logged = asyncio.run(session.is_logged_in(name))
+        if logged:
+            console.print(f"[green]{name}: sesión activa.[/green]")
+        else:
+            console.print(
+                f"[yellow]{name}: sin sesión. Ejecuta 'evdownloader login {name}'.[/yellow]"
+            )
 
 
 @app.command()
 def setup() -> None:
-    """Instala el navegador Chromium de Playwright (necesario solo para Platzi).
+    """Instala el navegador Chromium de Playwright (necesario para login en todas las plataformas).
 
-    Udemy y Codigofacilito no lo requieren (usan yt-dlp + ``--cookies-from-browser``).
+    Todas las plataformas (Platzi, Udemy, Codigofacilito) usan el navegador
+    para obtener la sesión manualmente. Udemy y Codigofacilito además necesitan
+    ``--cookies-from-browser`` para descargar (evitan Cloudflare).
     """
     import subprocess
     import sys

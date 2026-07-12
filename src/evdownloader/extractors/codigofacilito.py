@@ -65,6 +65,12 @@ class CodigofacilitoExtractor(Extractor):
     needs_browser = False
     login_url = CODIGOFACILITO_LOGIN_URL
     home_url = CODIGOFACILITO_BASE_URL
+    auth_ready_selector = (
+        'a[href*="/users/sign_out"], '
+        'form[action*="/users/sign_out"], '
+        'a[href*="/dashboard"], '
+        'a[href*="/perfil"]'
+    )
 
     def __init__(self) -> None:
         self._cookies_from_browser: str | None = None

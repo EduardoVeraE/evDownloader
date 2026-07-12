@@ -54,7 +54,7 @@ UDEMY_LOGIN_URL = "https://www.udemy.com/join/login-popup/"
 
 # --- Endpoints / dominios de Codigofacilito ---------------------------------
 CODIGOFACILITO_BASE_URL = "https://codigofacilito.com"
-CODIGOFACILITO_LOGIN_URL = "https://codigofacilito.com/login"
+CODIGOFACILITO_LOGIN_URL = "https://codigofacilito.com/users/sign_in"
 
 # Tiempo máximo (segundos) para que el usuario inicie sesión manualmente.
 LOGIN_TIMEOUT_S = 180
@@ -83,6 +83,7 @@ class Settings:
     use_drm: bool = False  # habilitar descifrado DRM cuando se detecte
     drm_license_server: str | None = None  # override de la license server URL
     drm_token: str | None = None  # override del token de autorización DRM
+    drm_device: Path | None = None  # ruta al archivo .wvd para Widevine CDM
 
 
 def ensure_dirs() -> None:

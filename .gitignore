@@ -12,6 +12,7 @@ build/
 # Proyecto
 Courses/
 downloads/
+CMDs/
 *.mp4
 *.vtt
 .mypy_cache/
@@ -19,6 +20,8 @@ downloads/
 .pytest_cache/
 
 # Beads / Dolt files (added by bd init)
+.beads
+.beads/*
 .dolt/
 *.db
 .beads-credential-key

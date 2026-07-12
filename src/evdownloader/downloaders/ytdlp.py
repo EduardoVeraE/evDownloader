@@ -14,6 +14,7 @@ corresponden por dominio.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import tempfile
 from pathlib import Path
@@ -42,6 +43,17 @@ class YtDlpDownloader(Downloader):
         import yt_dlp
 
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # DRM path: download encrypted media, then decrypt with mp4decrypt.
+        if source.drm and settings.use_drm:
+            return self._run_drm(source, dest, settings)
+        if source.drm and not settings.use_drm:
+            raise RuntimeError(
+                "DRM content detected but --use-drm is disabled. "
+                "Enable --use-drm to decrypt DRM-protected content, or "
+                "use the 'drm-proof' command for manual decryption."
+            )
+
         outtmpl = str(dest.with_suffix("")) + ".%(ext)s"
 
         base_opts: dict = {
@@ -122,6 +134,113 @@ class YtDlpDownloader(Downloader):
         # Si el contenedor difiere, devolver el primer archivo que coincida.
         matches = sorted(dest.parent.glob(dest.stem + ".*"))
         return matches[0] if matches else final
+
+    def _run_drm(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
+        """Download encrypted media and decrypt via prove_decrypt_path."""
+        import yt_dlp
+
+        from ..drm import normalize_widevine_license_input, prove_decrypt_path
+        from ..drm.license import post_license_challenge
+
+        if not settings.drm_device:
+            raise RuntimeError(
+                "DRM decryption requires a .wvd device file. "
+                "Provide one via --drm-device /path/to/device.wvd"
+            )
+        device_path = Path(settings.drm_device)
+        if not device_path.is_file():
+            raise RuntimeError(
+                f"Device file not found: {device_path}. "
+                "Provide a valid .wvd file via --drm-device."
+            )
+
+        # Normalize license input from source.drm + CLI overrides.
+        try:
+            license_input = normalize_widevine_license_input(
+                source.drm,  # type: ignore[arg-type]
+                override_license_url=settings.drm_license_server,
+                override_token=settings.drm_token,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"DRM license input error: {exc}") from exc
+
+        # Download encrypted media to a staging path (not the final .mp4).
+        encrypted_staging = dest.with_suffix(".encrypted.mp4")
+        outtmpl = str(dest.with_suffix("")) + ".encrypted.%(ext)s"
+
+        cookiefile: str | None = None
+        try:
+            base_opts: dict = {
+                "outtmpl": outtmpl,
+                "merge_output_format": "mp4",
+                "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
+                "http_headers": source.http_headers,
+                "concurrent_fragment_downloads": settings.concurrency,
+                "retries": 5,
+                "fragment_retries": 5,
+                "overwrites": settings.overwrite,
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": False,
+                # Allow downloading unplayable (DRM-protected) formats.
+                "allow_unplayable_formats": True,
+                "format": "bv*+ba/b",
+            }
+
+            if source.cookie_jar:
+                cookiefile = self._write_cookiefile(source.cookie_jar)
+                base_opts["cookiefile"] = cookiefile
+            elif settings.cookies_from_browser:
+                base_opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
+            elif source.cookies:
+                base_opts["http_headers"] = {
+                    **source.http_headers,
+                    "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
+                }
+
+            with yt_dlp.YoutubeDL(base_opts) as ydl:
+                ydl.download([source.url])
+        finally:
+            if cookiefile and os.path.exists(cookiefile):
+                os.remove(cookiefile)
+
+        # Resolve the actual encrypted file path from staging.
+        if not encrypted_staging.exists():
+            matches = sorted(dest.parent.glob(dest.stem + ".encrypted.*"))
+            if matches:
+                encrypted_staging = matches[0]
+            else:
+                raise RuntimeError(
+                    "DRM download produced no encrypted file. "
+                    "The media source may be unavailable."
+                )
+
+        # Decrypt via the proof pipeline.
+        final_output = dest.with_suffix(".mp4")
+        try:
+            import asyncio
+
+            result = asyncio.run(
+                prove_decrypt_path(
+                    license_input=license_input,
+                    device_path=device_path,
+                    encrypted_path=encrypted_staging,
+                    output_path=final_output,
+                    license_post=post_license_challenge,
+                )
+            )
+        except Exception as exc:
+            # Keep encrypted artifact on failure.
+            raise RuntimeError(
+                "DRM decryption failed. Encrypted artifact was kept for manual diagnosis."
+            ) from exc
+
+        # Remove encrypted staging on success.
+        if encrypted_staging.exists():
+            with contextlib.suppress(OSError):
+                encrypted_staging.unlink()
+
+        return result.output_path
 
     @classmethod
     def _write_cookiefile(cls, jar: list[Cookie]) -> str:

@@ -48,6 +48,9 @@ dev = [
     "mypy>=1.13.0",
     "types-aiofiles>=24.1.0",
 ]
+drm = [
+    "pywidevine>=1.8.0",
+]
 
 [project.scripts]
 evdownloader = "evdownloader.cli:app"

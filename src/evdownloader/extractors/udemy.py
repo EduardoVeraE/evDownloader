@@ -35,6 +35,8 @@ import rnet
 from playwright.async_api import BrowserContext
 
 from ..config import RNET_IMPERSONATE, UDEMY_BASE_URL, UDEMY_LOGIN_URL, Settings
+from ..drm import UDEMY_WIDEVINE_PROXY_URL, detect_drm
+from ..drm.token_cache import DrmTokenCache
 from ..models import (
     Chapter,
     Course,
@@ -67,14 +69,22 @@ class UdemyExtractor(Extractor):
     needs_browser = False
     login_url = UDEMY_LOGIN_URL
     home_url = UDEMY_BASE_URL
+    auth_ready_selector = '[data-purpose="user-avatar"]'
 
     def __init__(self) -> None:
         self._cookies_from_browser: str | None = None
+        self._use_drm = False
+        self._drm_license_server: str | None = None
+        self._drm_token: str | None = None
         self._cookie_header: str | None = None
         self._client: rnet.Client | None = None
+        self._token_cache = DrmTokenCache()
 
     def configure(self, settings: Settings) -> None:
         self._cookies_from_browser = settings.cookies_from_browser
+        self._use_drm = settings.use_drm
+        self._drm_license_server = settings.drm_license_server
+        self._drm_token = settings.drm_token
 
     @staticmethod
     def supports(url: str) -> bool:
@@ -208,10 +218,85 @@ class UdemyExtractor(Extractor):
     ) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
-        # No se resuelve aquí: el downloader (yt-dlp) toma la URL de la lección y
-        # la resuelve con las cookies del navegador (settings.cookies_from_browser).
-        # write_subs=True: yt-dlp baja también los subtítulos de la lección.
-        return VideoSource(url=unit.url, is_embed=True, write_subs=True)
+        # Por defecto no se resuelve aquí: el downloader (yt-dlp) toma la URL de
+        # la lección y la resuelve con las cookies del navegador. write_subs=True:
+        # yt-dlp baja también los subtítulos de la lección.
+        source = VideoSource(url=unit.url, is_embed=True, write_subs=True)
+        if self._use_drm:
+            await self._attach_drm(unit, source)
+        return source
+
+    async def _attach_drm(self, unit: Unit, source: VideoSource) -> None:
+        """Populate VideoSource.drm for DRM-protected Udemy lectures."""
+        if not unit.url or not self._cookies_from_browser:
+            return
+        course_id, lecture_id = self._ids_from_url(unit.url)
+        if not course_id or not lecture_id:
+            return
+
+        asset = self._token_cache.get(course_id, lecture_id)
+        if asset is None:
+            asset = await self._fetch_drm_asset(course_id, lecture_id)
+            self._token_cache.put(course_id, lecture_id, asset)
+        if not asset.get("course_is_drmed"):
+            return
+
+        mpd_url = self._dash_manifest_url(asset.get("media_sources") or [])
+        if not mpd_url:
+            return
+
+        manifest = await self._fetch_text(mpd_url)
+        detected = detect_drm(manifest, url=mpd_url).systems
+        drm = next((info for info in detected if info.scheme == "widevine"), None)
+        if drm is None:
+            drm = detected[0] if detected else None
+        if drm is None:
+            return
+
+        # Apply provider token (asset-level) first.
+        token = asset.get("media_license_token")
+        if isinstance(token, str) and token:
+            drm.token = token
+
+        # CLI license server override > detected > Udemy proxy default.
+        if self._drm_license_server:
+            drm.license_url = self._drm_license_server
+        elif not drm.license_url:
+            drm.license_url = UDEMY_WIDEVINE_PROXY_URL
+
+        # CLI token override > provider token (already in drm.token).
+        if self._drm_token:
+            drm.token = self._drm_token
+
+        source.drm = drm
+
+        # DRM mode: yt-dlp receives the MPD directly, not the lecture page.
+        source.url = mpd_url
+        source.is_embed = False
+        source.write_subs = False
+
+    async def _fetch_drm_asset(self, course_id: str, lecture_id: str) -> dict[str, Any]:
+        """Fetch only the Udemy asset fields needed for DRM detection."""
+        url = (
+            f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/{course_id}"
+            f"/lectures/{lecture_id}/?fields[lecture]=asset"
+            f"&fields[asset]=asset_type,course_is_drmed,media_license_token,media_sources"
+        )
+        try:
+            resp = await self._rnet_client().get(url, headers=self._api_headers())
+            data = json.loads(await resp.text())
+        except Exception:  # noqa: BLE001
+            return {}
+        asset = data.get("asset")
+        return asset if isinstance(asset, dict) else {}
+
+    @staticmethod
+    def _dash_manifest_url(media_sources: list[dict[str, Any]]) -> str | None:
+        """Return the DASH MPD URL from Udemy media_sources, if present."""
+        for source in media_sources:
+            if source.get("type") == "application/dash+xml" and source.get("src"):
+                return str(source["src"])
+        return None
 
     # -- Material complementario (recursos adjuntos y enlaces) ---------------
     async def resolve_extras(

@@ -75,6 +75,8 @@ class DrmInfo(BaseModel):
     license_url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     token: str | None = None
+    pssh: str | None = None
+    key_id: str | None = None
 
 
 class VideoSource(BaseModel):
