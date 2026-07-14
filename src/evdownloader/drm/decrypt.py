@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,7 +56,8 @@ def build_mp4decrypt_command(
         input_path: Path to the encrypted ``.mp4`` file.
         output_path: Desired path for the decrypted output.
         keys: At least one :class:`ContentKey`.
-        overwrite: If *True*, pass ``--force-overwrite``.
+        overwrite: Retained for compatibility; output replacement is handled
+            by the Python runner before atomic promotion.
 
     Returns:
         Argument list suitable for :func:`asyncio.create_subprocess_exec`.
@@ -67,8 +69,6 @@ def build_mp4decrypt_command(
         raise DecryptError("At least one content key is required for decryption.")
 
     cmd: list[str] = ["mp4decrypt"]
-    if overwrite:
-        cmd.append("--force-overwrite")
     for ck in keys:
         cmd.extend(["--key", f"{ck.kid}:{ck.key}"])
     cmd.append(str(input_path))
@@ -96,6 +96,11 @@ def _redact_cmd(cmd: list[str]) -> str:
         else:
             redacted.append(part)
     return " ".join(redacted)
+
+
+def _mp4decrypt_tmp_path(final: Path) -> Path:
+    """Return a hidden temporary path while preserving the media suffix."""
+    return final.with_name(f".{final.stem}.mp4decrypt.tmp{final.suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +143,7 @@ async def run_mp4decrypt(
         )
 
     # Write to a temporary path next to the final destination.
-    tmp_path = final.with_suffix(final.suffix + ".mp4decrypt.tmp")
+    tmp_path = _mp4decrypt_tmp_path(final)
     _cleanup(tmp_path)
 
     # Ensure the command targets the temporary path.
@@ -189,3 +194,96 @@ def _cleanup(path: Path) -> None:
     """Best-effort removal of a partial temporary file."""
     with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
+
+
+async def run_ffmpeg_mux(
+    input_paths: Sequence[str | Path],
+    output_path: str | Path,
+    *,
+    overwrite: bool = False,
+    timeout: float | None = None,
+) -> Path:
+    """Mux decrypted audio/video tracks into one MP4 without re-encoding."""
+    inputs = [Path(path) for path in input_paths]
+    if len(inputs) < 2:
+        raise DecryptError("At least two decrypted tracks are required for muxing.")
+    if any(not path.is_file() for path in inputs):
+        raise DecryptError("A decrypted track required for muxing is missing.")
+
+    final = Path(output_path)
+    if final.exists() and not overwrite:
+        raise DecryptError(f"Output file already exists: {final}.")
+    tmp_path = final.with_suffix(final.suffix + ".ffmpeg.tmp")
+    _cleanup(tmp_path)
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    for path in inputs:
+        cmd.extend(["-i", str(path)])
+    for index in range(len(inputs)):
+        cmd.extend(["-map", str(index)])
+    cmd.extend(["-c", "copy", "-f", "mp4", str(tmp_path)])
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        _cleanup(tmp_path)
+        raise DecryptError(f"ffmpeg mux timed out after {timeout}s.") from None
+    except FileNotFoundError:
+        _cleanup(tmp_path)
+        raise DecryptError("ffmpeg not found on PATH. Install FFmpeg.") from None
+    except Exception as exc:
+        _cleanup(tmp_path)
+        raise DecryptError(f"ffmpeg failed to execute: {type(exc).__name__}") from exc
+
+    if proc.returncode != 0:
+        _cleanup(tmp_path)
+        raise DecryptError(f"ffmpeg mux exited with code {proc.returncode}.")
+    if not tmp_path.is_file():
+        raise DecryptError("ffmpeg reported success but the temporary MP4 is missing.")
+
+    os.replace(tmp_path, final)
+    return final
+
+
+async def probe_stream_types(path: str | Path) -> set[str]:
+    """Read stream types from a media file using ffprobe."""
+    media_path = Path(path)
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(media_path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+    except FileNotFoundError:
+        raise DecryptError("ffprobe not found on PATH. Install FFmpeg.") from None
+    except Exception as exc:
+        raise DecryptError(f"ffprobe failed to execute: {type(exc).__name__}") from exc
+    if proc.returncode != 0:
+        raise DecryptError(f"ffprobe failed for media file: {media_path}")
+    return {line.strip() for line in stdout.decode(errors="replace").splitlines() if line.strip()}
+
+
+async def validate_mp4_streams(path: str | Path, required: set[str]) -> None:
+    """Ensure the final MP4 contains every stream type present in its inputs."""
+    actual = await probe_stream_types(path)
+    missing = sorted(required - actual)
+    if missing:
+        raise DecryptError(
+            f"Final MP4 is missing required stream(s): {', '.join(missing)}."
+        )

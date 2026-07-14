@@ -71,7 +71,7 @@ def download(
         None,
         "--cookies-from-browser",
         help="Navegador del que leer cookies (chrome, brave, safari...). "
-        "Requerido para Udemy y Codigofacilito.",
+        "Fallback para Udemy; requerido para Codigofacilito.",
     ),
     sub_langs: str = typer.Option(
         "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."
@@ -236,8 +236,8 @@ def setup() -> None:
     """Instala el navegador Chromium de Playwright (necesario para login en todas las plataformas).
 
     Todas las plataformas (Platzi, Udemy, Codigofacilito) usan el navegador
-    para obtener la sesión manualmente. Udemy y Codigofacilito además necesitan
-    ``--cookies-from-browser`` para descargar (evitan Cloudflare).
+    para obtener la sesión manualmente. Codigofacilito necesita además
+    ``--cookies-from-browser`` para descargar; en Udemy es solo fallback.
     """
     import subprocess
     import sys

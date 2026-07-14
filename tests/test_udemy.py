@@ -2,10 +2,10 @@
 
 Cubren, sin red ni yt-dlp real:
 * ``supports`` / registro / ``needs_browser``.
-* ``configure`` propaga el navegador de cookies.
+* ``configure`` propaga el navegador de fallback.
 * ``_build_course`` agrupa el currículum de la API 2.0 en capítulos y emite las
   URLs "smuggleadas" con el course_id.
-* ``list_course`` exige ``--cookies-from-browser``.
+* ``list_course`` exige una sesión persistida o ``--cookies-from-browser``.
 * ``resolve_video`` devuelve la URL de la lección para que la resuelva yt-dlp.
 * Separación de sesión por plataforma (``config.session_file``).
 """
@@ -16,14 +16,17 @@ import asyncio
 import base64
 import json
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from evdownloader import browser
 from evdownloader.config import Settings, session_file
 from evdownloader.drm.license import UDEMY_WIDEVINE_PROXY_URL
 from evdownloader.drm.token_cache import DrmTokenCache, _decode_jwt_exp
 from evdownloader.extractors import get_extractor, get_extractor_by_name
 from evdownloader.extractors.udemy import UdemyExtractor
-from evdownloader.models import ResourceKind, Unit, UnitType
+from evdownloader.models import DrmInfo, ResourceKind, Unit, UnitType
 
 
 # Fixtures con el formato de cached-subscriber-curriculum-items de la API 2.0.
@@ -42,6 +45,18 @@ _CURRICULUM = [
     _chapter("Introducción", 2),
     _lecture("3", "Crear cuenta"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def no_real_udemy_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aísla todos los tests del archivo real de sesión del usuario."""
+    monkeypatch.setattr(
+        browser,
+        "resolve_cookies",
+        lambda platform, browser_name=None: [
+            {"name": "access_token", "value": "test-session", "domain": ".udemy.com"}
+        ],
+    )
 
 
 # -- Enrutado / capacidades ---------------------------------------------------
@@ -125,15 +140,18 @@ def test_build_course_leccion_suelta_sin_capitulo() -> None:
     assert len(course.chapters[0].units) == 1
 
 
-# -- list_course exige cookies del navegador ---------------------------------
+# -- list_course exige una fuente de credenciales -----------------------------
 def test_list_course_sin_cookies_lanza() -> None:
-    ex = UdemyExtractor()  # sin configure -> sin cookies_from_browser
-    try:
-        asyncio.run(ex.list_course(None, "https://www.udemy.com/course/x/"))
-    except ValueError as e:
-        assert "cookies-from-browser" in str(e)
-    else:
-        raise AssertionError("Se esperaba ValueError por falta de --cookies-from-browser")
+    ex = UdemyExtractor()  # sin sesión persistida ni cookies_from_browser
+    with patch("evdownloader.extractors.udemy.browser.resolve_cookies", return_value=[]):
+        try:
+            asyncio.run(ex.list_course(None, "https://www.udemy.com/course/x/"))
+        except ValueError as e:
+            message = str(e)
+            assert "evd login udemy" in message
+            assert "cookies-from-browser" in message
+        else:
+            raise AssertionError("Se esperaba ValueError por falta de credenciales")
 
 
 # -- resolve_video no navega: entrega la URL de la lección -------------------
@@ -147,6 +165,24 @@ def test_resolve_video_devuelve_url_de_leccion() -> None:
     # yt-dlp debe extraer los subtítulos junto con el video.
     assert src.write_subs is True
     assert src.drm is None
+
+
+def test_resolve_video_comparte_sesion_persistida_con_ytdlp() -> None:
+    cookies = [
+        {"name": "access_token", "value": "not-for-output", "domain": ".udemy.com"},
+        {"name": "sid", "value": "third-party", "domain": ".google.com"},
+    ]
+    ex = UdemyExtractor()
+    ex.configure(Settings(cookies_from_browser="brave"))
+
+    with patch("evdownloader.extractors.udemy.browser.resolve_cookies", return_value=cookies):
+        unit = Unit(title="x", url="https://www.udemy.com/x/lecture/1", index=1)
+        src = asyncio.run(ex.resolve_video(None, unit))
+
+    assert src is not None
+    assert src.cookies == {"access_token": "not-for-output"}
+    assert src.cookie_jar[0].name == "access_token"
+    assert len(src.cookie_jar) == 1
 
 
 def test_resolve_video_con_use_drm_detecta_metadata() -> None:
@@ -323,6 +359,28 @@ def test_cache_reuses_valid_token() -> None:
     assert src1 is not None and src1.drm is not None
     assert src2 is not None and src2.drm is not None
     assert fetch_mock.call_count == 1
+
+
+def test_drm_refresher_runs_fetch_on_original_loop() -> None:
+    """The worker-thread callback schedules Udemy I/O on the source loop."""
+    ex = UdemyExtractor()
+    current = DrmInfo(scheme="widevine", token="old-token")
+    observed_loops: list[asyncio.AbstractEventLoop] = []
+
+    async def fetch_drm_asset(course_id: str, lecture_id: str) -> dict:
+        observed_loops.append(asyncio.get_running_loop())
+        return _drm_asset("fresh-token")
+
+    async def exercise() -> None:
+        source_loop = asyncio.get_running_loop()
+        ex._fetch_drm_asset = fetch_drm_asset  # type: ignore[method-assign]
+        refresh = ex._build_drm_refresher("course", "lecture", current)
+        refreshed = await asyncio.to_thread(lambda: asyncio.run(refresh()))
+        assert refreshed is not None
+        assert refreshed.token == "fresh-token"
+        assert observed_loops == [source_loop]
+
+    asyncio.run(exercise())
 
 
 def test_cache_rejects_expired_token() -> None:

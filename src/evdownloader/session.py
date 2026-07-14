@@ -32,15 +32,17 @@ _SESSION_COOKIES: dict[str, list[str]] = {
 }
 
 
+def _has_valid_auth_cookie(platform: str, cookies: list[dict]) -> bool:
+    return browser.has_usable_session(platform, cookies)
+
+
 async def _poll_auth_cookie(
     ctx: BrowserContext, platform: str, *, interval: float = 2.0
 ) -> bool:
     """Espera (polling) a que aparezca una cookie de sesión conocida en el contexto."""
-    known = _SESSION_COOKIES.get(platform, [])
     while True:
         cookies = await ctx.cookies()
-        names = {c["name"] for c in cookies}
-        if any(k in names for k in known):
+        if _has_valid_auth_cookie(platform, cookies):
             return True
         await asyncio.sleep(interval)
 
@@ -105,7 +107,13 @@ async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
             console.print("[red]No se detectó el inicio de sesión a tiempo.[/red]")
             return False
 
-        cookies = await ctx.cookies()
+        cookies = browser.filter_cookies(platform, await ctx.cookies())
+        if _SESSION_COOKIES.get(platform) and not _has_valid_auth_cookie(platform, cookies):
+            console.print(
+                "[red]El inicio de sesión no produjo una cookie válida. "
+                "Vuelve a intentarlo.[/red]"
+            )
+            return False
         browser.save_cookies(cookies, platform)
         console.print("[green]Sesión guardada correctamente.[/green]")
         return True
@@ -115,11 +123,14 @@ async def is_logged_in(platform: str) -> bool:
     """Verifica si hay una sesión válida navegando con las cookies guardadas.
 
     Si el navegador headless no puede cargar la página (Cloudflare), hace un
-    chequeo de respaldo: busca nombres de cookie de sesión conocidos en el
-    archivo persistido de la plataforma.
+    chequeo de respaldo local de la cookie de sesión persistida. No realiza una
+    llamada adicional a la plataforma.
     """
     original_cookies = browser.load_cookies(platform)
-    if not original_cookies:
+    if platform == "platzi":
+        if not original_cookies:
+            return False
+    elif not browser.has_usable_session(platform, original_cookies):
         return False
     extractor = get_extractor_by_name(platform)
     async with browser.browser_context(headless=True, with_session=True, platform=platform) as ctx:
@@ -129,11 +140,9 @@ async def is_logged_in(platform: str) -> bool:
             await page.wait_for_selector(extractor.auth_ready_selector, timeout=8000)
             return True
         except Exception:
-            # Fallback: verificar cookies de sesión conocidas (bypass Cloudflare).
-            known = _SESSION_COOKIES.get(platform, [])
-            if known:
-                stored_names = {c.get("name") for c in original_cookies}
-                return any(k in stored_names for k in known)
+            # Fallback local: evita otro endpoint cuando Cloudflare bloquea Playwright.
+            if platform in _SESSION_COOKIES:
+                return browser.has_usable_session(platform, original_cookies)
             return False
 
 

@@ -13,6 +13,7 @@ build/
 Courses/
 downloads/
 CMDs/
+CDMs/
 *.mp4
 *.vtt
 .mypy_cache/

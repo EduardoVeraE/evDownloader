@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
 from rich.console import Console
@@ -30,6 +31,7 @@ console = Console()
 # Cookies de sesión (sin expiración fija) escritas con esta expiración lejana
 # para que yt-dlp no las descarte al cargar el cookiefile.
 _SESSION_COOKIE_EXPIRY = 2147483647  # 2038-01-19, máx. de 32 bits
+_DRM_ARTIFACT_EXTENSIONS = frozenset({".mp4", ".m4a", ".isma", ".ismv"})
 
 
 class YtDlpDownloader(Downloader):
@@ -154,19 +156,23 @@ class YtDlpDownloader(Downloader):
                 "Provide a valid .wvd file via --drm-device."
             )
 
-        # Normalize license input from source.drm + CLI overrides.
-        try:
-            license_input = normalize_widevine_license_input(
-                source.drm,  # type: ignore[arg-type]
-                override_license_url=settings.drm_license_server,
-                override_token=settings.drm_token,
+        # Build Cookie header from source cookies for the license POST.
+        extra_headers: dict[str, str] = {}
+        if source.cookie_jar:
+            cookie_str = "; ".join(
+                f"{c.name}={c.value}"
+                for c in source.cookie_jar
             )
-        except Exception as exc:
-            raise RuntimeError(f"DRM license input error: {exc}") from exc
+            extra_headers["Cookie"] = cookie_str
+        elif source.cookies:
+            extra_headers["Cookie"] = "; ".join(
+                f"{k}={v}" for k, v in source.cookies.items()
+            )
+        extra_headers.setdefault("Referer", "https://www.udemy.com/")
 
-        # Download encrypted media to a staging path (not the final .mp4).
-        encrypted_staging = dest.with_suffix(".encrypted.mp4")
-        outtmpl = str(dest.with_suffix("")) + ".encrypted.%(ext)s"
+        # Isolate each attempt so a retry never consumes a previous attempt's files.
+        staging_id = uuid.uuid4().hex
+        outtmpl = str(dest.with_suffix("")) + f".encrypted.{staging_id}.%(ext)s"
 
         cookiefile: str | None = None
         try:
@@ -204,29 +210,50 @@ class YtDlpDownloader(Downloader):
             if cookiefile and os.path.exists(cookiefile):
                 os.remove(cookiefile)
 
-        # Resolve the actual encrypted file path from staging.
-        if not encrypted_staging.exists():
-            matches = sorted(dest.parent.glob(dest.stem + ".encrypted.*"))
-            if matches:
-                encrypted_staging = matches[0]
-            else:
-                raise RuntimeError(
-                    "DRM download produced no encrypted file. "
-                    "The media source may be unavailable."
-                )
+        encrypted_paths = self._encrypted_artifacts(dest, staging_id)
+        if not encrypted_paths:
+            raise RuntimeError(
+                "DRM download produced no compatible encrypted file. "
+                "The media source may be unavailable."
+            )
+
+        # Refresh only when the source provides a safe mechanism and no explicit
+        # token was supplied. This runs after media download and before challenge.
+        if not settings.drm_token and source.drm_refresher is not None:
+            try:
+                refreshed = asyncio.run(source.drm_refresher())
+            except ValueError as exc:
+                raise RuntimeError("DRM token refresh returned no token.") from exc
+            except Exception as exc:
+                raise RuntimeError("DRM token refresh failed before license request.") from exc
+            if refreshed is None or not refreshed.token:
+                raise RuntimeError("DRM token refresh returned no token.")
+            source.drm = refreshed
+
+        # Normalize license input only after the late refresh so the challenge uses
+        # the newest provider token. Explicit CLI values still win in the normalizer.
+        try:
+            license_input = normalize_widevine_license_input(
+                source.drm,  # type: ignore[arg-type]
+                override_license_url=settings.drm_license_server,
+                override_token=settings.drm_token,
+                extra_headers=extra_headers,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"DRM license input error: {exc}") from exc
 
         # Decrypt via the proof pipeline.
         final_output = dest.with_suffix(".mp4")
         try:
-            import asyncio
-
             result = asyncio.run(
                 prove_decrypt_path(
                     license_input=license_input,
                     device_path=device_path,
-                    encrypted_path=encrypted_staging,
+                    encrypted_path=encrypted_paths,
                     output_path=final_output,
                     license_post=post_license_challenge,
+                    validate_output=True,
+                    overwrite=settings.overwrite,
                 )
             )
         except Exception as exc:
@@ -236,11 +263,28 @@ class YtDlpDownloader(Downloader):
             ) from exc
 
         # Remove encrypted staging on success.
-        if encrypted_staging.exists():
+        for encrypted_path in encrypted_paths:
             with contextlib.suppress(OSError):
-                encrypted_staging.unlink()
+                encrypted_path.unlink()
 
         return result.output_path
+
+    @staticmethod
+    def _encrypted_artifacts(dest: Path, staging_id: str) -> list[Path]:
+        """Return compatible encrypted tracks in deterministic path order."""
+        prefix = f"{dest.stem}.encrypted.{staging_id}."
+        return sorted(
+            [
+                path
+                for path in dest.parent.iterdir()
+                if (
+                    path.is_file()
+                    and path.name.startswith(prefix)
+                    and path.suffix.lower() in _DRM_ARTIFACT_EXTENSIONS
+                )
+            ],
+            key=lambda path: path.name,
+        )
 
     @classmethod
     def _write_cookiefile(cls, jar: list[Cookie]) -> str:

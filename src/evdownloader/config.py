@@ -72,9 +72,9 @@ class Settings:
     concurrency: int = 8
     limit: int | None = None  # nº máximo de clases de video a descargar (None = todas)
     resources: bool = True  # descargar resumen, archivos adjuntos, enlaces y MHTML
-    # Navegador del que yt-dlp lee las cookies (chrome, brave, safari...). Lo
-    # usan los extractores que delegan en yt-dlp (Udemy) para autenticar sin
-    # navegador automatizado. None = no usar cookies del navegador.
+    # Navegador de fallback del que yt-dlp/extractores leen cookies (chrome,
+    # brave, safari...). Udemy prioriza la sesión de evd login udemy y solo lo
+    # usa si no hay sesión persistida. None = no usar cookies del navegador.
     cookies_from_browser: str | None = None
     # Idiomas de subtítulos a descargar (formato yt-dlp: "all", "es,en", "es.*").
     # Aplica a los extractores que delegan los subtítulos en yt-dlp (Udemy).

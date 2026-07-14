@@ -15,8 +15,12 @@ from evdownloader.drm.cdm import CdmUnavailableError, WidevineCdmSession
 from evdownloader.drm.decrypt import (
     ContentKey,
     DecryptError,
+    _mp4decrypt_tmp_path,
     build_mp4decrypt_command,
+    probe_stream_types,
+    run_ffmpeg_mux,
     run_mp4decrypt,
+    validate_mp4_streams,
 )
 from evdownloader.drm.license import WidevineLicenseInput
 from evdownloader.drm.proof import ProofError, prove_decrypt_path
@@ -92,12 +96,16 @@ class TestBuildMp4decryptCommand:
         with pytest.raises(DecryptError, match="At least one content key"):
             build_mp4decrypt_command("/in.mp4", "/out.mp4", [])
 
-    def test_overwrite_flag(self) -> None:
+    def test_overwrite_does_not_add_unsupported_flag(self) -> None:
         keys = [ContentKey(kid=_KID1, key=_KEY1)]
         cmd = build_mp4decrypt_command("/in", "/out", keys, overwrite=True)
-        assert "--force-overwrite" in cmd
-        # Overwrite flag must come before positional args
-        assert cmd.index("--force-overwrite") < cmd.index("/in")
+        assert "--force-overwrite" not in cmd
+        assert cmd == [
+            "mp4decrypt",
+            "--key", f"{_KID1}:{_KEY1}",
+            "/in",
+            "/out",
+        ]
 
     def test_path_types_accepted(self) -> None:
         keys = [ContentKey(kid=_KID1, key=_KEY1)]
@@ -128,7 +136,7 @@ class TestRunMp4decrypt:
         output_file = tmp_path / "dec.mp4"
         input_file.write_bytes(b"encrypted")
 
-        tmp_file = output_file.with_suffix(output_file.suffix + ".mp4decrypt.tmp")
+        tmp_file = _mp4decrypt_tmp_path(output_file)
 
         mock_proc = AsyncMock()
 
@@ -145,8 +153,37 @@ class TestRunMp4decrypt:
             result = await run_mp4decrypt(input_file, output_file, keys)
 
             assert result == output_file
+            assert mock_exec.call_args.args[-1] == str(tmp_file)
             # Temp file should not exist after rename
             assert not tmp_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_audio_temp_preserves_m4a_extension(self, tmp_path: Path) -> None:
+        """AAC decryption receives a temporary output that still ends in .m4a."""
+        keys = [ContentKey(kid=_KID1, key=_KEY1)]
+        input_file = tmp_path / "enc.m4a"
+        output_file = tmp_path / "audio.m4a"
+        input_file.write_bytes(b"encrypted")
+        tmp_file = _mp4decrypt_tmp_path(output_file)
+
+        mock_proc = AsyncMock()
+
+        async def _fake_communicate() -> tuple[bytes, bytes]:
+            assert tmp_file.suffix == ".m4a"
+            tmp_file.write_bytes(b"decrypted")
+            return b"", b""
+
+        mock_proc.communicate = _fake_communicate
+        mock_proc.returncode = 0
+
+        with patch("evdownloader.drm.decrypt.asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await run_mp4decrypt(input_file, output_file, keys)
+
+        assert result == output_file
+        assert mock_exec.call_args.args[-1] == str(tmp_file)
+        assert tmp_file.suffix == ".m4a"
+        assert not tmp_file.exists()
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_raises(self, tmp_path: Path) -> None:
@@ -189,7 +226,7 @@ class TestRunMp4decrypt:
                 await run_mp4decrypt(input_file, output_file, keys)
 
             # Temp file should not survive
-            tmp_file = output_file.with_suffix(output_file.suffix + ".mp4decrypt.tmp")
+            tmp_file = _mp4decrypt_tmp_path(output_file)
             assert not tmp_file.exists()
 
     @pytest.mark.asyncio
@@ -223,6 +260,75 @@ class TestRunMp4decrypt:
 
         with pytest.raises(DecryptError, match="already exists"):
             await run_mp4decrypt(input_file, output_file, keys)
+
+
+class TestFfmpegMux:
+    """Tests for the mocked FFmpeg mux boundary."""
+
+    @pytest.mark.asyncio
+    async def test_mux_maps_tracks_in_input_order(self, tmp_path: Path) -> None:
+        audio = tmp_path / "audio.m4a"
+        video = tmp_path / "video.mp4"
+        output = tmp_path / "final.mp4"
+        audio.write_bytes(b"audio")
+        video.write_bytes(b"video")
+        tmp_output = output.with_suffix(output.suffix + ".ffmpeg.tmp")
+
+        mock_proc = AsyncMock()
+
+        async def _fake_communicate() -> tuple[bytes, bytes]:
+            tmp_output.write_bytes(b"muxed")
+            return b"", b""
+
+        mock_proc.communicate = _fake_communicate
+        mock_proc.returncode = 0
+
+        with patch("evdownloader.drm.decrypt.asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = mock_proc
+            result = await run_ffmpeg_mux([audio, video], output)
+
+        assert result == output
+        command = mock_exec.call_args.args
+        assert command[0] == "ffmpeg"
+        assert command.index(str(audio)) < command.index(str(video))
+        assert command[command.index("-map") + 1] == "0"
+        assert command[command.index("-map") + 3] == "1"
+        assert command[-5:-3] == ("-c", "copy")
+        assert command[-3:-1] == ("-f", "mp4")
+        assert command[-1] == str(tmp_output)
+
+    @pytest.mark.asyncio
+    async def test_validation_rejects_missing_stream_type(self, tmp_path: Path) -> None:
+        output = tmp_path / "final.mp4"
+        output.write_bytes(b"mp4")
+
+        with patch(
+            "evdownloader.drm.decrypt.probe_stream_types",
+            new_callable=AsyncMock,
+            return_value={"video"},
+        ):
+            with pytest.raises(DecryptError, match="audio"):
+                await validate_mp4_streams(output, {"video", "audio"})
+
+    @pytest.mark.asyncio
+    async def test_probe_returns_video_and_audio_without_csv_commas(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "final.mp4"
+        output.write_bytes(b"mp4")
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"video\naudio\n", b""))
+        mock_proc.returncode = 0
+
+        with patch("evdownloader.drm.decrypt.asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = mock_proc
+            stream_types = await probe_stream_types(output)
+
+        assert stream_types == {"video", "audio"}
+        command = mock_exec.call_args.args
+        assert command[command.index("-of") + 1] == (
+            "default=noprint_wrappers=1:nokey=1"
+        )
 
 
 # ============================================================================
@@ -316,6 +422,109 @@ class TestProofHelper:
             assert len(result.keys) == 1
             assert result.keys[0].kid == _KID1
             mock_decrypt.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_multiple_tracks_use_one_license_and_mux_to_mp4(self, tmp_path: Path) -> None:
+        """All encrypted tracks are decrypted, muxed, and checked with ffprobe."""
+        device = tmp_path / "device.wvd"
+        device.write_bytes(b"fake-device")
+        audio = tmp_path / "audio.encrypted.m4a"
+        video = tmp_path / "video.encrypted.mp4"
+        audio.write_bytes(b"encrypted-audio")
+        video.write_bytes(b"encrypted-video")
+        output = tmp_path / "final.mp4"
+        decrypt_calls: list[Path] = []
+
+        async def fake_decrypt(*, input_path, output_path, keys, overwrite=False):
+            decrypt_calls.append(input_path)
+            Path(output_path).write_bytes(b"decrypted")
+            return Path(output_path)
+
+        async def fake_mux(input_paths, output_path, *, overwrite=False):
+            assert input_paths[0].suffix == ".m4a"
+            assert input_paths[1].suffix == ".mp4"
+            return Path(output_path)
+
+        with (
+            patch("evdownloader.drm.proof.run_mp4decrypt", side_effect=fake_decrypt),
+            patch(
+                "evdownloader.drm.proof.probe_stream_types",
+                new_callable=AsyncMock,
+                side_effect=[{"audio"}, {"video"}],
+            ) as mock_probe,
+            patch("evdownloader.drm.proof.run_ffmpeg_mux", side_effect=fake_mux) as mock_mux,
+            patch(
+                "evdownloader.drm.proof.validate_mp4_streams",
+                new_callable=AsyncMock,
+            ) as mock_validate,
+        ):
+            result = await prove_decrypt_path(
+                license_input=_make_license_input(),
+                device_path=device,
+                encrypted_path=[audio, video],
+                output_path=output,
+                license_post=_fake_license_post,
+                cdm_session_cls=FakeCdmSession,  # type: ignore[arg-type]
+                validate_output=True,
+            )
+
+        assert result.output_path == output
+        assert decrypt_calls == [audio, video]
+        assert mock_mux.await_count == 1
+        assert mock_probe.await_count == 2
+        mock_validate.assert_awaited_once_with(output, {"audio", "video"})
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_removes_final_and_parts(self, tmp_path: Path) -> None:
+        """A promoted but invalid final must not survive for a later retry."""
+        device = tmp_path / "device.wvd"
+        device.write_bytes(b"fake-device")
+        audio = tmp_path / "audio.encrypted.m4a"
+        video = tmp_path / "video.encrypted.mp4"
+        audio.write_bytes(b"encrypted-audio")
+        video.write_bytes(b"encrypted-video")
+        output = tmp_path / "final.mp4"
+        ffmpeg_tmp = output.with_suffix(output.suffix + ".ffmpeg.tmp")
+
+        async def fake_decrypt(*, output_path, **kwargs):
+            part = Path(output_path)
+            part.write_bytes(b"decrypted")
+            _mp4decrypt_tmp_path(part).write_bytes(b"partial")
+            return part
+
+        async def fake_mux(input_paths, output_path, **kwargs):
+            Path(output_path).write_bytes(b"invalid-mux")
+            ffmpeg_tmp.write_bytes(b"partial-mux")
+            return Path(output_path)
+
+        with (
+            patch("evdownloader.drm.proof.run_mp4decrypt", side_effect=fake_decrypt),
+            patch(
+                "evdownloader.drm.proof.probe_stream_types",
+                new_callable=AsyncMock,
+                side_effect=[{"audio"}, {"video"}],
+            ),
+            patch("evdownloader.drm.proof.run_ffmpeg_mux", side_effect=fake_mux),
+            patch(
+                "evdownloader.drm.proof.validate_mp4_streams",
+                new_callable=AsyncMock,
+                side_effect=DecryptError("missing audio"),
+            ),
+        ):
+            with pytest.raises(ProofError, match="missing audio"):
+                await prove_decrypt_path(
+                    license_input=_make_license_input(),
+                    device_path=device,
+                    encrypted_path=[audio, video],
+                    output_path=output,
+                    license_post=_fake_license_post,
+                    cdm_session_cls=FakeCdmSession,  # type: ignore[arg-type]
+                    validate_output=True,
+                )
+
+        assert not output.exists()
+        assert not ffmpeg_tmp.exists()
+        assert not list(tmp_path.glob(".final.decrypted-*"))
 
     @pytest.mark.asyncio
     async def test_udemy_license_input_posts_to_runtime_proxy_url(self, tmp_path: Path) -> None:

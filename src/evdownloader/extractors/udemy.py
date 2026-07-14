@@ -2,8 +2,8 @@
 
 Udemy está detrás de Cloudflare Turnstile, que detecta el CDP de cualquier
 navegador automatizado (Playwright) y entra en un loop de verificación. Por eso
-NO se navega Udemy con un navegador: se usan las cookies del navegador REAL del
-usuario (``--cookies-from-browser``), donde ya pasó Cloudflare como humano.
+NO se navega Udemy con un navegador: se prioriza la sesión guardada por
+``evd login udemy`` y se usa ``--cookies-from-browser`` como fallback explícito.
 
 Por qué NO se delega el listado en ``udemy:course`` de yt-dlp: ese extractor
 saca el ``course_id`` de la página con regex (``data-course-id``...). Udemy está
@@ -26,6 +26,7 @@ núcleo lo registra como fallo de esa clase y continúa con el resto.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -34,12 +35,15 @@ from urllib.parse import parse_qs, unquote_plus, urlencode, urlsplit
 import rnet
 from playwright.async_api import BrowserContext
 
+from .. import browser
 from ..config import RNET_IMPERSONATE, UDEMY_BASE_URL, UDEMY_LOGIN_URL, Settings
 from ..drm import UDEMY_WIDEVINE_PROXY_URL, detect_drm
 from ..drm.token_cache import DrmTokenCache
 from ..models import (
     Chapter,
     Course,
+    DrmInfo,
+    DrmRefresher,
     Resource,
     ResourceKind,
     Unit,
@@ -77,6 +81,8 @@ class UdemyExtractor(Extractor):
         self._drm_license_server: str | None = None
         self._drm_token: str | None = None
         self._cookie_header: str | None = None
+        self._cookies: list[dict[str, Any]] = []
+        self._cookies_loaded = False
         self._client: rnet.Client | None = None
         self._token_cache = DrmTokenCache()
 
@@ -85,6 +91,9 @@ class UdemyExtractor(Extractor):
         self._use_drm = settings.use_drm
         self._drm_license_server = settings.drm_license_server
         self._drm_token = settings.drm_token
+        self._cookies = []
+        self._cookies_loaded = False
+        self._cookie_header = None
 
     @staticmethod
     def supports(url: str) -> bool:
@@ -92,10 +101,10 @@ class UdemyExtractor(Extractor):
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
-        if not self._cookies_from_browser:
+        if not self._load_cookies(required=True):
             raise ValueError(
-                "Udemy requiere --cookies-from-browser <navegador> "
-                "(chrome, brave, safari...) para autenticar la sesión."
+                "Udemy no tiene una sesión disponible. Ejecuta `evd login udemy` "
+                "o usa --cookies-from-browser <navegador> (chrome, brave, safari...)."
             )
         course_id = await self._resolve_course_id(url)
         if not course_id:
@@ -218,17 +227,32 @@ class UdemyExtractor(Extractor):
     ) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        cookies = self._load_cookies(required=True)
+        if not cookies:
+            raise ValueError(
+                "Udemy no tiene una sesión utilizable. Ejecuta `evd login udemy` "
+                "o proporciona un navegador con una sesión activa."
+            )
         # Por defecto no se resuelve aquí: el downloader (yt-dlp) toma la URL de
-        # la lección y la resuelve con las cookies del navegador. write_subs=True:
+        # la lección y la resuelve con las cookies de la misma fuente. write_subs=True:
         # yt-dlp baja también los subtítulos de la lección.
-        source = VideoSource(url=unit.url, is_embed=True, write_subs=True)
+        source = VideoSource(
+            url=unit.url,
+            is_embed=True,
+            cookies=browser.cookies_as_dict(cookies),
+            cookie_jar=browser.cookies_as_records(cookies),
+            write_subs=True,
+        )
         if self._use_drm:
             await self._attach_drm(unit, source)
         return source
 
     async def _attach_drm(self, unit: Unit, source: VideoSource) -> None:
         """Populate VideoSource.drm for DRM-protected Udemy lectures."""
-        if not unit.url or not self._cookies_from_browser:
+        if not unit.url:
+            return
+        cookies = self._load_cookies()
+        if not cookies and not self._cookies_from_browser:
             return
         course_id, lecture_id = self._ids_from_url(unit.url)
         if not course_id or not lecture_id:
@@ -269,11 +293,35 @@ class UdemyExtractor(Extractor):
             drm.token = self._drm_token
 
         source.drm = drm
+        source.drm_refresher = self._build_drm_refresher(course_id, lecture_id, drm)
 
         # DRM mode: yt-dlp receives the MPD directly, not the lecture page.
         source.url = mpd_url
         source.is_embed = False
         source.write_subs = False
+
+    def _build_drm_refresher(
+        self, course_id: str, lecture_id: str, current: DrmInfo
+    ) -> DrmRefresher:
+        """Build a late asset refresh callback without performing another request now."""
+        source_loop = asyncio.get_running_loop()
+
+        async def refresh() -> DrmInfo | None:
+            if source_loop.is_closed() or not source_loop.is_running():
+                raise RuntimeError("Udemy DRM refresh loop is no longer running.")
+            if asyncio.get_running_loop() is source_loop:
+                asset = await self._fetch_drm_asset(course_id, lecture_id)
+            else:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._fetch_drm_asset(course_id, lecture_id), source_loop
+                )
+                asset = await asyncio.wrap_future(future)
+            token = asset.get("media_license_token")
+            if not isinstance(token, str) or not token:
+                raise ValueError("Udemy did not return a fresh DRM media license token.")
+            return current.model_copy(update={"token": token})
+
+        return refresh
 
     async def _fetch_drm_asset(self, course_id: str, lecture_id: str) -> dict[str, Any]:
         """Fetch only the Udemy asset fields needed for DRM detection."""
@@ -308,7 +356,7 @@ class UdemyExtractor(Extractor):
         URLs de descarga que devuelve Udemy están firmadas (no requieren cookies
         para bajarlas). No se captura MHTML (no hay navegador).
         """
-        if not unit.url or not self._cookies_from_browser:
+        if not unit.url or not self._load_cookies():
             return UnitExtras()
         course_id, lecture_id = self._ids_from_url(unit.url)
         if not course_id or not lecture_id:
@@ -416,13 +464,29 @@ class UdemyExtractor(Extractor):
         return self._client
 
     def _udemy_cookie_header(self) -> str:
-        """Construye (una vez) el header Cookie de udemy.com desde el navegador."""
+        """Construye (una vez) el header Cookie de Udemy desde la fuente común."""
         if self._cookie_header is None:
-            from yt_dlp.cookies import extract_cookies_from_browser
-
-            assert self._cookies_from_browser is not None
-            jar = extract_cookies_from_browser(self._cookies_from_browser)
+            cookies = self._load_cookies()
             self._cookie_header = "; ".join(
-                f"{c.name}={c.value}" for c in jar if "udemy.com" in (c.domain or "")
+                f"{cookie['name']}={cookie['value']}"
+                for cookie in cookies
+                if browser.is_udemy_cookie(cookie)
             )
         return self._cookie_header
+
+    def _load_cookies(self, *, required: bool = False) -> list[dict[str, Any]]:
+        """Carga una única fuente de cookies, priorizando la sesión persistida."""
+        if not self._cookies_loaded:
+            try:
+                self._cookies = browser.filter_cookies(
+                    "udemy",
+                    browser.resolve_cookies("udemy", self._cookies_from_browser),
+                )
+            except ValueError:
+                if required:
+                    raise
+                self._cookies = []
+            self._cookies_loaded = True
+        if required and not self._cookies:
+            return []
+        return self._cookies

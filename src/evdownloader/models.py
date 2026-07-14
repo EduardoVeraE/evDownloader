@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -79,6 +80,9 @@ class DrmInfo(BaseModel):
     key_id: str | None = None
 
 
+DrmRefresher = Callable[[], Awaitable[DrmInfo | None]]
+
+
 class VideoSource(BaseModel):
     """Fuente de video resuelta, lista para entregar a un downloader.
 
@@ -101,6 +105,8 @@ class VideoSource(BaseModel):
     write_subs: bool = False
     # DRM: se rellena cuando el extractor detecta contenido protegido.
     drm: DrmInfo | None = None
+    # Runtime-only callback. It is intentionally excluded from cached/serialized data.
+    drm_refresher: DrmRefresher | None = Field(default=None, exclude=True, repr=False)
 
 
 class Unit(BaseModel):

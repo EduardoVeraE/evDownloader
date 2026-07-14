@@ -13,13 +13,21 @@ everything without touching real files, licenses, or device keys.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .cdm import CdmUnavailableError, WidevineCdmSession
-from .decrypt import ContentKey, DecryptError, run_mp4decrypt
+from .decrypt import (
+    ContentKey,
+    DecryptError,
+    _mp4decrypt_tmp_path,
+    probe_stream_types,
+    run_ffmpeg_mux,
+    run_mp4decrypt,
+    validate_mp4_streams,
+)
 from .license import (
     UDEMY_WIDEVINE_PROXY_URL,
     WidevineLicenseInput,
@@ -39,6 +47,28 @@ class ProofResult:
     keys: list[ContentKey]
 
 
+def _cleanup_decryption_outputs(
+    output_path: Path, decrypted_paths: Sequence[Path]
+) -> None:
+    """Remove final, part, and known temporary outputs after validation failure."""
+    paths = {
+        output_path,
+        output_path.with_suffix(output_path.suffix + ".ffmpeg.tmp"),
+    }
+    for decrypted in decrypted_paths:
+        paths.update(
+            {
+                decrypted,
+                _mp4decrypt_tmp_path(decrypted),
+            }
+        )
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # Type alias for the injectable license POST function.
 LicensePostFn = Callable[
     [str, bytes, dict[str, str]],
@@ -50,10 +80,12 @@ async def prove_decrypt_path(
     *,
     license_input: WidevineLicenseInput,
     device_path: Path,
-    encrypted_path: Path,
+    encrypted_path: Path | Sequence[Path],
     output_path: Path,
     license_post: LicensePostFn,
     cdm_session_cls: type[WidevineCdmSession] = WidevineCdmSession,
+    validate_output: bool = False,
+    overwrite: bool = False,
 ) -> ProofResult:
     """Run the full decrypt proof pipeline.
 
@@ -89,8 +121,12 @@ async def prove_decrypt_path(
         raise ProofError("License URL is required but was not provided in license_input.")
     if not device_path.is_file():
         raise ProofError(f"Device file not found: {device_path}")
-    if not encrypted_path.is_file():
-        raise ProofError(f"Encrypted file not found: {encrypted_path}")
+    encrypted_paths = [encrypted_path] if isinstance(encrypted_path, Path) else list(encrypted_path)
+    if not encrypted_paths:
+        raise ProofError("At least one encrypted file is required.")
+    missing = [path for path in encrypted_paths if not path.is_file()]
+    if missing:
+        raise ProofError(f"Encrypted file not found: {missing[0]}")
 
     # -- step 1: CDM challenge ------------------------------------------------
     session = None
@@ -139,14 +175,63 @@ async def prove_decrypt_path(
                 close()
 
     # -- step 4: decrypt ------------------------------------------------------
+    decrypted_paths: list[Path] = []
+    validation_failed = False
     try:
-        result_path = await run_mp4decrypt(
-            input_path=encrypted_path,
-            output_path=output_path,
-            keys=keys,
-        )
+        for index, encrypted in enumerate(encrypted_paths):
+            part_output = output_path
+            if len(encrypted_paths) > 1:
+                part_output = output_path.with_name(
+                    f".{output_path.stem}.decrypted-{index}{encrypted.suffix}"
+                )
+            decrypted_paths.append(
+                await run_mp4decrypt(
+                    input_path=encrypted,
+                    output_path=part_output,
+                    keys=keys,
+                    overwrite=overwrite,
+                )
+            )
+
+        required_streams: set[str] = set()
+        if validate_output:
+            try:
+                for decrypted in decrypted_paths:
+                    required_streams.update(await probe_stream_types(decrypted))
+                if not required_streams:
+                    raise DecryptError(
+                        "ffprobe found no media streams in decrypted artifacts."
+                    )
+            except DecryptError:
+                validation_failed = True
+                raise
+
+        if len(decrypted_paths) > 1:
+            result_path = await run_ffmpeg_mux(
+                decrypted_paths,
+                output_path,
+                overwrite=overwrite,
+            )
+        else:
+            result_path = decrypted_paths[0]
+
+        if validate_output:
+            try:
+                await validate_mp4_streams(result_path, required_streams)
+            except DecryptError:
+                validation_failed = True
+                raise
     except DecryptError as exc:
         raise ProofError(f"Decryption failed: {exc}") from exc
+    finally:
+        if len(decrypted_paths) > 1:
+            for decrypted in decrypted_paths:
+                try:
+                    decrypted.unlink()
+                except OSError:
+                    pass
+        if validation_failed:
+            _cleanup_decryption_outputs(output_path, decrypted_paths)
 
     return ProofResult(output_path=result_path, keys=keys)
 

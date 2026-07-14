@@ -17,6 +17,23 @@ class CdmUnavailableError(Exception):
     """Raised when pywidevine is not installed or a device file is invalid."""
 
 
+def _to_hex(value: Any) -> str:
+    """Normalize a KID or key value to an unpadded hex string.
+
+    Handles bytes, UUID, and str inputs so the same helper works
+    across pywidevine 1.x versions that may change Key field types.
+    """
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, str):
+        return value.lower().replace("-", "")
+    # uuid.UUID — .hex is a property (no parens)
+    h = getattr(value, "hex", None)
+    if h is not None and not callable(h):
+        return h
+    return str(value).lower().replace("-", "")
+
+
 @dataclass
 class WidevineCdmSession:
     """Thin wrapper around a pywidevine CDM session.
@@ -90,8 +107,8 @@ class WidevineCdmSession:
         for bound in bound_keys:
             if getattr(bound, "type", None) not in (None, "CONTENT"):
                 continue
-            kid_hex = bound.kid.hex()
-            key_hex = bound.key.hex()
+            kid_hex = _to_hex(bound.kid)
+            key_hex = _to_hex(bound.key)
             keys.append((kid_hex, key_hex))
         return keys
 
