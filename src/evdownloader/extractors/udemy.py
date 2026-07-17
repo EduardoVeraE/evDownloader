@@ -65,6 +65,8 @@ _COURSE_ID_PAGE_RES = (
     re.compile(r'"courseId"\s*:\s*(\d+)'),
     re.compile(r"courseId=(\d+)"),
 )
+_DRM_REFRESH_ATTEMPTS = 3
+_DRM_REFRESH_BACKOFF_SECONDS = (1.0, 2.0)
 
 
 class UdemyExtractor(Extractor):
@@ -306,20 +308,28 @@ class UdemyExtractor(Extractor):
         """Build a late asset refresh callback without performing another request now."""
         source_loop = asyncio.get_running_loop()
 
-        async def refresh() -> DrmInfo | None:
+        async def refresh_on_source_loop() -> DrmInfo:
+            for attempt in range(_DRM_REFRESH_ATTEMPTS):
+                try:
+                    asset = await self._fetch_drm_asset(course_id, lecture_id)
+                    token = asset.get("media_license_token")
+                    if isinstance(token, str) and token:
+                        return current.model_copy(update={"token": token})
+                except Exception:  # noqa: BLE001
+                    pass
+
+                if attempt < _DRM_REFRESH_ATTEMPTS - 1:
+                    await asyncio.sleep(_DRM_REFRESH_BACKOFF_SECONDS[attempt])
+
+            raise ValueError("Udemy did not return a fresh DRM media license token.")
+
+        async def refresh() -> DrmInfo:
             if source_loop.is_closed() or not source_loop.is_running():
                 raise RuntimeError("Udemy DRM refresh loop is no longer running.")
             if asyncio.get_running_loop() is source_loop:
-                asset = await self._fetch_drm_asset(course_id, lecture_id)
-            else:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._fetch_drm_asset(course_id, lecture_id), source_loop
-                )
-                asset = await asyncio.wrap_future(future)
-            token = asset.get("media_license_token")
-            if not isinstance(token, str) or not token:
-                raise ValueError("Udemy did not return a fresh DRM media license token.")
-            return current.model_copy(update={"token": token})
+                return await refresh_on_source_loop()
+            future = asyncio.run_coroutine_threadsafe(refresh_on_source_loop(), source_loop)
+            return await asyncio.wrap_future(future)
 
         return refresh
 

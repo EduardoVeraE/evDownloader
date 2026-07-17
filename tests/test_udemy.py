@@ -383,6 +383,50 @@ def test_drm_refresher_runs_fetch_on_original_loop() -> None:
     asyncio.run(exercise())
 
 
+def test_drm_refresher_retries_missing_token_then_succeeds() -> None:
+    """A missing token is retried with bounded exponential backoff."""
+    ex = UdemyExtractor()
+    current = DrmInfo(scheme="widevine", token="old-token")
+    fetch = AsyncMock(side_effect=[{}, {"media_license_token": "fresh-token"}])
+    ex._fetch_drm_asset = fetch  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        refresh = ex._build_drm_refresher("course", "lecture", current)
+        refreshed = await refresh()
+        assert refreshed.token == "fresh-token"
+
+    with patch(
+        "evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        asyncio.run(exercise())
+
+    assert fetch.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+
+
+def test_drm_refresher_raises_after_transient_failures_and_empty_assets() -> None:
+    """Exceptions and incomplete assets do not fall back to the old token."""
+    ex = UdemyExtractor()
+    current = DrmInfo(scheme="widevine", token="old-token")
+    fetch = AsyncMock(
+        side_effect=[RuntimeError("temporary"), {}, {"media_license_token": ""}]
+    )
+    ex._fetch_drm_asset = fetch  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        refresh = ex._build_drm_refresher("course", "lecture", current)
+        with pytest.raises(ValueError, match="fresh DRM media license token"):
+            await refresh()
+
+    with patch(
+        "evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        asyncio.run(exercise())
+
+    assert fetch.await_count == 3
+    assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0]
+
+
 def test_cache_rejects_expired_token() -> None:
     """Expired token is not reused and causes a refetch."""
     ex = UdemyExtractor()
