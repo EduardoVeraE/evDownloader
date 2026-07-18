@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import typer
+from packaging.version import InvalidVersion, Version
 from rich.console import Console
 
 from . import __version__, cache, session
@@ -21,12 +27,72 @@ console = Console()
 
 _PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy | codigofacilito.")
 _PLATFORMS = ("platzi", "udemy", "codigofacilito")
+_PYPI_URL = "https://pypi.org/pypi/evdownloader/json"
 
 
 def _version_callback(value: bool) -> None:
     if value:
         console.print(f"evdownloader {__version__}")
         raise typer.Exit()
+
+
+def _latest_published_version() -> str:
+    request = Request(_PYPI_URL, headers={"Accept": "application/json"})
+    with urlopen(request, timeout=10) as response:
+        payload = json.load(response)
+    latest = payload.get("info", {}).get("version")
+    if not isinstance(latest, str) or not latest:
+        raise ValueError("PyPI no devolvió una versión válida.")
+    return latest
+
+
+def _upgrade_commands() -> list[list[str]]:
+    commands: list[list[str]] = []
+    if shutil.which("uv"):
+        commands.append(["uv", "tool", "upgrade", "evdownloader"])
+    if shutil.which("pipx"):
+        commands.append(["pipx", "upgrade", "evdownloader"])
+    commands.append([sys.executable, "-m", "pip", "install", "--upgrade", "evDownloader"])
+    return commands
+
+
+def _upgrade_package() -> int:
+    errors: list[str] = []
+    for command in _upgrade_commands():
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if output:
+                console.print(output)
+            return 0
+        detail = result.stderr.strip() or result.stdout.strip() or "sin detalles"
+        errors.append(f"{' '.join(command[:2])}: {detail}")
+
+    console.print("[red]No se pudo actualizar evDownloader.[/red]")
+    for error in errors:
+        console.print(f"[dim]{error}[/dim]")
+    return 1
+
+
+def _update_callback(value: bool) -> None:
+    if not value:
+        return
+    if __version__ == "unknown":
+        console.print("[red]No se pudo determinar la versión instalada.[/red]")
+        raise typer.Exit(code=1)
+    try:
+        current = Version(__version__)
+        latest = Version(_latest_published_version())
+    except (InvalidVersion, OSError, ValueError) as exc:
+        console.print(f"[red]No se pudo consultar PyPI: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if latest <= current:
+        console.print(f"[green]Ya estás actualizado ({current}).[/green]")
+        raise typer.Exit()
+
+    console.print(f"[cyan]Actualizando evDownloader {current} → {latest}…[/cyan]")
+    raise typer.Exit(code=_upgrade_package())
 
 
 @app.callback()
@@ -37,6 +103,13 @@ def main(
         callback=_version_callback,
         is_eager=True,
         help="Muestra la versión instalada.",
+    ),
+    update: bool = typer.Option(
+        False,
+        "--update",
+        callback=_update_callback,
+        is_eager=True,
+        help="Busca y actualiza a la última versión publicada en PyPI.",
     ),
 ) -> None:
     """Configura las opciones globales de la CLI."""

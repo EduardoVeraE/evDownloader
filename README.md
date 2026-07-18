@@ -260,6 +260,7 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 
 ```bash
 evdownloader --version      # muestra la versión instalada
+evdownloader --update       # busca y actualiza desde PyPI si hay una versión nueva
 evdownloader setup          # instala Chromium de Playwright (solo Platzi)
 evdownloader status         # ¿hay sesión activa? (Platzi)
 evdownloader logout         # cerrar sesión guardada

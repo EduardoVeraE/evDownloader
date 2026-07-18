@@ -1,5 +1,6 @@
 # Runtime dependencies (keep in sync with pyproject.toml)
 typer>=0.15.0
+packaging>=24.2
 pydantic>=2.12.0
 playwright>=1.60.0
 yt-dlp>=2026.1.1

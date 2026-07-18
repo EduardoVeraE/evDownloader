@@ -1,6 +1,6 @@
 [project]
 name = "evDownloader"
-version = "0.1.1"
+version = "0.1.2"
 description = "Descargador de cursos de video para Platzi, Udemy y Codigofacilito, con extracción por interceptación de red y motor híbrido yt-dlp / nativo."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -29,6 +29,7 @@ classifiers = [
 
 dependencies = [
     "typer>=0.15.0",
+    "packaging>=24.2",
     "pydantic>=2.12.0",
     "playwright>=1.60.0",
     "yt-dlp>=2026.1.1",
