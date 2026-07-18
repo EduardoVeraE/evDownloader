@@ -259,6 +259,7 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 ### Otros comandos
 
 ```bash
+evdownloader --version      # muestra la versión instalada
 evdownloader setup          # instala Chromium de Playwright (solo Platzi)
 evdownloader status         # ¿hay sesión activa? (Platzi)
 evdownloader logout         # cerrar sesión guardada

@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from . import cache, session
+from . import __version__, cache, session
 from .config import Settings, ensure_dirs
 
 app = typer.Typer(
@@ -21,6 +21,25 @@ console = Console()
 
 _PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy | codigofacilito.")
 _PLATFORMS = ("platzi", "udemy", "codigofacilito")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"evdownloader {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Muestra la versión instalada.",
+    ),
+) -> None:
+    """Configura las opciones globales de la CLI."""
 
 
 @app.command()
