@@ -23,7 +23,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ..config import Settings
-from ..models import Cookie, VideoSource
+from ..models import Cookie, DrmInfo, DrmRefresher, VideoSource
 from .base import Downloader
 
 console = Console()
@@ -32,6 +32,10 @@ console = Console()
 # para que yt-dlp no las descarte al cargar el cookiefile.
 _SESSION_COOKIE_EXPIRY = 2147483647  # 2038-01-19, máx. de 32 bits
 _DRM_ARTIFACT_EXTENSIONS = frozenset({".mp4", ".m4a", ".isma", ".ismv"})
+
+
+async def _run_drm_refresher(refresher: DrmRefresher) -> DrmInfo | None:
+    return await refresher()
 
 
 class YtDlpDownloader(Downloader):
@@ -219,9 +223,10 @@ class YtDlpDownloader(Downloader):
 
         # Refresh only when the source provides a safe mechanism and no explicit
         # token was supplied. This runs after media download and before challenge.
-        if not settings.drm_token and source.drm_refresher is not None:
+        refresher = source.drm_refresher
+        if not settings.drm_token and refresher is not None:
             try:
-                refreshed = asyncio.run(source.drm_refresher())
+                refreshed = asyncio.run(_run_drm_refresher(refresher))
             except ValueError as exc:
                 raise RuntimeError("DRM token refresh returned no token.") from exc
             except Exception as exc:

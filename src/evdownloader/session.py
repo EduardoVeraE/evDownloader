@@ -13,6 +13,8 @@ busca nombres de cookie de sesión conocidos en el archivo persistido.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page
@@ -32,7 +34,9 @@ _SESSION_COOKIES: dict[str, list[str]] = {
 }
 
 
-def _has_valid_auth_cookie(platform: str, cookies: list[dict]) -> bool:
+def _has_valid_auth_cookie(
+    platform: str, cookies: Sequence[Mapping[str, Any]]
+) -> bool:
     return browser.has_usable_session(platform, cookies)
 
 

@@ -13,6 +13,7 @@ everything without touching real files, licenses, or device keys.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,10 +64,8 @@ def _cleanup_decryption_outputs(
             }
         )
     for path in paths:
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 # Type alias for the injectable license POST function.
@@ -226,10 +225,8 @@ async def prove_decrypt_path(
     finally:
         if len(decrypted_paths) > 1:
             for decrypted in decrypted_paths:
-                try:
+                with contextlib.suppress(OSError):
                     decrypted.unlink()
-                except OSError:
-                    pass
         if validation_failed:
             _cleanup_decryption_outputs(output_path, decrypted_paths)
 

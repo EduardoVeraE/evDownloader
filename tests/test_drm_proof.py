@@ -306,9 +306,8 @@ class TestFfmpegMux:
             "evdownloader.drm.decrypt.probe_stream_types",
             new_callable=AsyncMock,
             return_value={"video"},
-        ):
-            with pytest.raises(DecryptError, match="audio"):
-                await validate_mp4_streams(output, {"video", "audio"})
+        ), pytest.raises(DecryptError, match="audio"):
+            await validate_mp4_streams(output, {"video", "audio"})
 
     @pytest.mark.asyncio
     async def test_probe_returns_video_and_audio_without_csv_commas(
@@ -510,17 +509,17 @@ class TestProofHelper:
                 new_callable=AsyncMock,
                 side_effect=DecryptError("missing audio"),
             ),
+            pytest.raises(ProofError, match="missing audio"),
         ):
-            with pytest.raises(ProofError, match="missing audio"):
-                await prove_decrypt_path(
-                    license_input=_make_license_input(),
-                    device_path=device,
-                    encrypted_path=[audio, video],
-                    output_path=output,
-                    license_post=_fake_license_post,
-                    cdm_session_cls=FakeCdmSession,  # type: ignore[arg-type]
-                    validate_output=True,
-                )
+            await prove_decrypt_path(
+                license_input=_make_license_input(),
+                device_path=device,
+                encrypted_path=[audio, video],
+                output_path=output,
+                license_post=_fake_license_post,
+                cdm_session_cls=FakeCdmSession,  # type: ignore[arg-type]
+                validate_output=True,
+            )
 
         assert not output.exists()
         assert not ffmpeg_tmp.exists()
