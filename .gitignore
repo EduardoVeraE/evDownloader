@@ -19,6 +19,7 @@ CDMs/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.codegraph/
 
 # Beads / Dolt files (added by bd init)
 .beads

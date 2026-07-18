@@ -6,13 +6,17 @@ playlists de subtítulos ``.vtt.m3u8``.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from evdownloader.extractors.platzi import (
     _M3U8_RE,
     _MDSTRM_EMBED_RE,
     _VTT_RE,
     PlatziExtractor,
 )
-from evdownloader.models import UnitType
+from evdownloader.models import Unit, UnitType
 
 
 def test_clasifica_video_por_miniatura_mdstrm() -> None:
@@ -53,3 +57,66 @@ def test_embed_extrae_id() -> None:
     m = _MDSTRM_EMBED_RE.search("https://mdstrm.com/embed/5f3a1b2c3d?foo=bar")
     assert m is not None
     assert m.group(1) == "5f3a1b2c3d"
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_captura_vtt_solicitado_tarde() -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.listener = None
+            self.waits = 0
+
+        def on(self, event: str, listener) -> None:
+            assert event == "request"
+            self.listener = listener
+
+        async def goto(self, url: str, wait_until: str) -> None:
+            assert url == "https://platzi.com/clase/video/"
+            assert wait_until == "domcontentloaded"
+
+        async def wait_for_event(self, event: str, predicate, timeout: int):
+            assert event == "request"
+            self.waits += 1
+            url = (
+                "https://mdstrm.com/embed/video-1"
+                if self.waits == 1
+                else "https://cdn.mdstrm.com/subtitles/es-delayed.vtt"
+            )
+            request = SimpleNamespace(url=url)
+            assert predicate(request)
+            assert self.listener is not None
+            self.listener(request)
+            return request
+
+        async def wait_for_timeout(self, timeout: int) -> None:
+            assert timeout == 1500
+
+        def remove_listener(self, event: str, listener) -> None:
+            assert event == "request"
+            assert listener is self.listener
+            self.listener = None
+
+        async def close(self) -> None:
+            assert self.listener is None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.page = FakePage()
+
+        async def new_page(self) -> FakePage:
+            return self.page
+
+        async def cookies(self) -> list[dict[str, str]]:
+            return []
+
+    ctx = FakeContext()
+    unit = Unit(
+        title="Video",
+        url="https://platzi.com/clase/video/",
+        type=UnitType.VIDEO,
+    )
+
+    source = await PlatziExtractor().resolve_video(ctx, unit)
+
+    assert source is not None
+    assert source.subtitles[0].url == "https://cdn.mdstrm.com/subtitles/es-delayed.vtt"

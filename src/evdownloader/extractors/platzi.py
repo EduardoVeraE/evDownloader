@@ -93,6 +93,7 @@ _MDSTRM_EMBED_RE = re.compile(r"https?://mdstrm\.com/embed/(\w+)")
 # .m3u8 que NO sea un playlist de subtítulos (.vtt.m3u8).
 _M3U8_RE = re.compile(r"https?://[^\s\"'}]+?(?<!\.vtt)\.m3u8\b")
 _VTT_RE = re.compile(r"https?://[^\s\"'}]+\.vtt\b")
+_VTT_WAIT_TIMEOUT_MS = 5000
 
 
 class PlatziExtractor(Extractor):
@@ -208,6 +209,15 @@ class PlatziExtractor(Extractor):
                 )
             # Margen extra para subtítulos y playlists secundarios.
             await page.wait_for_timeout(1500)
+            if not vtt_urls:
+                # El listener sigue activo para capturar pistas que el reproductor
+                # solicita después de la primera carga.
+                with contextlib.suppress(Exception):
+                    await page.wait_for_event(
+                        "request",
+                        predicate=lambda r: bool(_VTT_RE.search(r.url)),
+                        timeout=_VTT_WAIT_TIMEOUT_MS,
+                    )
 
             # Como respaldo, leer el src del iframe del reproductor en el DOM.
             if not embed_urls:
