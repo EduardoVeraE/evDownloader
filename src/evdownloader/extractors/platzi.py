@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import re
+from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Request
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .. import browser
 from ..config import DEFAULT_USER_AGENT, LOGIN_URL, MEDIASTREAM_HOSTS, PLATZI_BASE_URL
@@ -92,8 +94,25 @@ _PLATZI_FILE_HOSTS = ("static.platzi.com", "files.platzi.com")
 _MDSTRM_EMBED_RE = re.compile(r"https?://mdstrm\.com/embed/(\w+)")
 # .m3u8 que NO sea un playlist de subtítulos (.vtt.m3u8).
 _M3U8_RE = re.compile(r"https?://[^\s\"'}]+?(?<!\.vtt)\.m3u8\b")
-_VTT_RE = re.compile(r"https?://[^\s\"'}]+\.vtt\b")
-_VTT_WAIT_TIMEOUT_MS = 5000
+_VTT_RE = re.compile(r"https?://[^\s\"'}?#]+\.vtt(?:[?#][^\s\"'}]*)?$")
+_VTT_HOSTS = ("platzi.com", *MEDIASTREAM_HOSTS)
+# Espera máxima de la primera petición de media después de navegar.
+_MEDIA_DETECTION_TIMEOUT_MS = 20_000
+# Preserva el presupuesto anterior de 1.5 s + 5 s para el primer VTT tras la media.
+_FIRST_VTT_AFTER_MEDIA_TIMEOUT_MS = 6_500
+# En vivo las pistas llegaron en ráfagas de ~3 ms; este margen recoge las tardías.
+_VTT_TRAILING_COLLECTION_MS = 1_500
+
+
+def _is_allowed_vtt_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return bool(_VTT_RE.search(url)) and any(
+        hostname == host or hostname.endswith(f".{host}") for host in _VTT_HOSTS
+    )
+
+
+def _is_media_request(url: str) -> bool:
+    return bool(_MDSTRM_EMBED_RE.search(url) or _M3U8_RE.search(url))
 
 
 class PlatziExtractor(Extractor):
@@ -189,48 +208,55 @@ class PlatziExtractor(Extractor):
 
         def on_request(req: Request) -> None:
             u = req.url
-            if any(host in u for host in MEDIASTREAM_HOSTS) and "/embed/" in u:
+            if _MDSTRM_EMBED_RE.search(u):
                 embed_urls.append(u)
             if _M3U8_RE.search(u):
                 m3u8_urls.append(u)
-            elif _VTT_RE.search(u):
+            elif _is_allowed_vtt_url(u):
                 vtt_urls.add(u)
 
         page.on("request", on_request)
         try:
             await page.goto(unit.url, wait_until="domcontentloaded")
-            # Dar tiempo al reproductor a disparar las peticiones de Mediastream.
-            with contextlib.suppress(Exception):
-                await page.wait_for_event(
-                    "request",
-                    predicate=lambda r: any(h in r.url for h in MEDIASTREAM_HOSTS)
-                    or bool(_M3U8_RE.search(r.url)),
-                    timeout=20000,
-                )
-            # Margen extra para subtítulos y playlists secundarios.
-            await page.wait_for_timeout(1500)
-            if not vtt_urls:
-                # El listener sigue activo para capturar pistas que el reproductor
-                # solicita después de la primera carga.
-                with contextlib.suppress(Exception):
-                    await page.wait_for_event(
+            if not embed_urls and not m3u8_urls:
+                try:
+                    request = await page.wait_for_event(
                         "request",
-                        predicate=lambda r: bool(_VTT_RE.search(r.url)),
-                        timeout=_VTT_WAIT_TIMEOUT_MS,
+                        predicate=lambda r: _is_media_request(r.url),
+                        timeout=_MEDIA_DETECTION_TIMEOUT_MS,
                     )
+                except PlaywrightTimeoutError:
+                    pass
+                else:
+                    on_request(request)
+            if not vtt_urls:
+                try:
+                    request = await page.wait_for_event(
+                        "request",
+                        predicate=lambda r: _is_allowed_vtt_url(r.url),
+                        timeout=_FIRST_VTT_AFTER_MEDIA_TIMEOUT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                else:
+                    vtt_urls.add(request.url)
+            if vtt_urls:
+                await page.wait_for_timeout(_VTT_TRAILING_COLLECTION_MS)
 
             # Como respaldo, leer el src del iframe del reproductor en el DOM.
             if not embed_urls:
                 embed_urls.extend(await self._iframe_embeds(page))
         finally:
-            page.remove_listener("request", on_request)
-            await page.close()
+            try:
+                page.remove_listener("request", on_request)
+            finally:
+                await page.close()
 
         raw_cookies = await ctx.cookies()
         cookies = browser.cookies_as_dict(raw_cookies)
         cookie_jar = browser.cookies_as_records(raw_cookies)
         headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": PLATZI_BASE_URL + "/"}
-        subtitles = [Subtitle(url=v) for v in sorted(vtt_urls)]
+        subtitles = [Subtitle(url=url) for url in sorted(vtt_urls)]
 
         # Preferir el embed de Mediastream (yt-dlp lo resuelve con sus tokens).
         if embed_urls:

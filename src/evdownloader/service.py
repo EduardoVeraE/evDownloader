@@ -159,13 +159,17 @@ async def _save_subtitles(subtitles: list[Subtitle], base: Path, source) -> None
     headers = dict(source.http_headers)
     if source.cookies:
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in source.cookies.items())
+    language_counts: dict[str, int] = {}
     for sub in subtitles:
+        occurrence = language_counts.get(sub.lang, 0) + 1
+        suffix = "" if occurrence == 1 else f"-{occurrence}"
         try:
             resp = await client.get(sub.url, headers=headers)
             content = await resp.text()
-            sub_path = base.with_suffix(f".{sub.lang}.vtt")
+            sub_path = base.with_suffix(f".{sub.lang}{suffix}.vtt")
             async with aiofiles.open(sub_path, "w", encoding="utf-8") as f:
                 await f.write(content)
+            language_counts[sub.lang] = occurrence
         except Exception:  # noqa: BLE001, S112
             continue
 
