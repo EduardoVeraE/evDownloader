@@ -30,6 +30,7 @@ def test_ytdlp_usa_cookiefile_de_la_fuente_resuelta_y_lo_borra(tmp_path: Path) -
             exists_during_download = cookiefile.exists()
             has_cookie = "access_token" in cookiefile.read_text(encoding="utf-8")
             cookiefile_path = cookiefile
+            (tmp_path / "video.mp4").write_bytes(b"media")
 
         instance.download.side_effect = download
         YtDlpDownloader()._run(source, tmp_path / "video", Settings(download_dir=tmp_path))
@@ -47,6 +48,11 @@ def test_ytdlp_conserva_fallback_explicito_al_navegador(tmp_path: Path) -> None:
         instance = MagicMock()
         ytdl.return_value.__enter__.return_value = instance
         ytdl.return_value.__exit__.return_value = False
+
+        def download(_urls) -> None:
+            (tmp_path / "video.mp4").write_bytes(b"media")
+
+        instance.download.side_effect = download
         YtDlpDownloader()._run(
             source,
             tmp_path / "video",

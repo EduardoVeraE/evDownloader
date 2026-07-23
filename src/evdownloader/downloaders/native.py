@@ -31,7 +31,7 @@ class NativeDownloader(Downloader):
                 "Prueba con el motor por defecto (yt-dlp)."
             )
         dest.parent.mkdir(parents=True, exist_ok=True)
-        out = dest.with_suffix(".mp4")
+        out = dest.parent / f"{dest.name}.mp4"
         await self._ffmpeg(m3u8_url, out, source, settings)
         return out
 

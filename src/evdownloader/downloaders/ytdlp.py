@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import stat
 import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 from rich.console import Console
@@ -32,6 +34,9 @@ console = Console()
 # para que yt-dlp no las descarte al cargar el cookiefile.
 _SESSION_COOKIE_EXPIRY = 2147483647  # 2038-01-19, máx. de 32 bits
 _DRM_ARTIFACT_EXTENSIONS = frozenset({".mp4", ".m4a", ".isma", ".ismv"})
+_MEDIA_EXTENSIONS = frozenset({".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".ts", ".webm"})
+_MAX_SUBTITLE_BYTES = 10 * 1024 * 1024
+_ASCII_WHITESPACE = b" \t\r\n"
 
 
 async def _run_drm_refresher(refresher: DrmRefresher) -> DrmInfo | None:
@@ -40,10 +45,61 @@ async def _run_drm_refresher(refresher: DrmRefresher) -> DrmInfo | None:
 
 class YtDlpDownloader(Downloader):
     name = "ytdlp"
+    supports_managed_subtitles = True
 
     async def download(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
         # yt-dlp es síncrono; ejecutarlo en un hilo para no bloquear el loop.
         return await asyncio.to_thread(self._run, source, dest, settings)
+
+    async def download_subtitles(
+        self, source: VideoSource, dest: Path, settings: Settings
+    ) -> list[Path]:
+        """Descarga solo subtítulos y devuelve ``dest.*.vtt`` en orden de ruta."""
+        return await asyncio.to_thread(self._run_subtitles, source, dest, settings)
+
+    @staticmethod
+    def _common_options(source: VideoSource, dest: Path, settings: Settings) -> dict:
+        return {
+            "outtmpl": str(dest) + ".%(ext)s",
+            "http_headers": source.http_headers,
+            "concurrent_fragment_downloads": settings.concurrency,
+            "retries": 5,
+            "fragment_retries": 5,
+            "overwrites": settings.overwrite,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": False,
+        }
+
+    @contextlib.contextmanager
+    def _cookie_options(
+        self, base_opts: dict, source: VideoSource, settings: Settings
+    ) -> Iterator[dict]:
+        opts = dict(base_opts)
+        cookiefile: str | None = None
+        try:
+            if source.cookie_jar:
+                cookiefile = self._write_cookiefile(source.cookie_jar)
+                opts["cookiefile"] = cookiefile
+            elif settings.cookies_from_browser:
+                # yt-dlp lee las cookies directamente del navegador real del
+                # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
+                opts["cookiesfrombrowser"] = (
+                    settings.cookies_from_browser,
+                    None,
+                    None,
+                    None,
+                )
+            elif source.cookies:
+                # Respaldo si no hay cookies completas: header (deprecado).
+                opts["http_headers"] = {
+                    **source.http_headers,
+                    "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
+                }
+            yield opts
+        finally:
+            if cookiefile and os.path.exists(cookiefile):
+                os.remove(cookiefile)
 
     def _run(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
         import yt_dlp
@@ -60,10 +116,8 @@ class YtDlpDownloader(Downloader):
                 "use the 'drm-proof' command for manual decryption."
             )
 
-        outtmpl = str(dest.with_suffix("")) + ".%(ext)s"
-
         base_opts: dict = {
-            "outtmpl": outtmpl,
+            **self._common_options(source, dest, settings),
             "merge_output_format": "mp4",
             # ``merge_output_format`` solo normaliza el contenedor cuando hay que
             # muxear video+audio separados. Un formato progresivo único conserva
@@ -73,14 +127,6 @@ class YtDlpDownloader(Downloader):
             # si ya es mp4, yt-dlp lo omite (no afecta a Platzi/Udemy). Se declara
             # explícitamente porque la opción ``remux_video`` solo la traduce el CLI.
             "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-            "http_headers": source.http_headers,
-            "concurrent_fragment_downloads": settings.concurrency,
-            "retries": 5,
-            "fragment_retries": 5,
-            "overwrites": settings.overwrite,
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": False,
         }
 
         if source.write_subs:
@@ -90,22 +136,7 @@ class YtDlpDownloader(Downloader):
             base_opts["subtitleslangs"] = [x for x in settings.sub_langs.split(",") if x]
             base_opts["subtitlesformat"] = "vtt/best"
 
-        cookiefile: str | None = None
-        try:
-            if source.cookie_jar:
-                cookiefile = self._write_cookiefile(source.cookie_jar)
-                base_opts["cookiefile"] = cookiefile
-            elif settings.cookies_from_browser:
-                # yt-dlp lee las cookies directamente del navegador real del
-                # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
-                base_opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
-            elif source.cookies:
-                # Respaldo si no hay cookies completas: header (deprecado).
-                base_opts["http_headers"] = {
-                    **source.http_headers,
-                    "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
-                }
-
+        with self._cookie_options(base_opts, source, settings) as base_opts:
             # --- Cadena de formatos: progressive primero, HLS como fallback ---
             primary_fmt = self._format_selector(settings.quality)
             hls_fmt = self._hls_format_selector(settings.quality)
@@ -130,16 +161,91 @@ class YtDlpDownloader(Downloader):
 
             if last_error is not None:
                 raise last_error
-        finally:
-            if cookiefile and os.path.exists(cookiefile):
-                os.remove(cookiefile)
 
-        final = dest.with_suffix(".mp4")
-        if final.exists():
+        final = dest.parent / f"{dest.name}.mp4"
+        if self._is_regular_file(final):
             return final
-        # Si el contenedor difiere, devolver el primer archivo que coincida.
-        matches = sorted(dest.parent.glob(dest.stem + ".*"))
-        return matches[0] if matches else final
+        matches = sorted(
+            path
+            for path in dest.parent.iterdir()
+            if (
+                path.name.startswith(dest.name + ".")
+                and path.suffix.lower() in _MEDIA_EXTENSIONS
+                and self._is_regular_file(path)
+            )
+        )
+        if matches:
+            return matches[0]
+        raise RuntimeError("yt-dlp produced no supported media file")
+
+    def _run_subtitles(self, source: VideoSource, dest: Path, settings: Settings) -> list[Path]:
+        import yt_dlp
+
+        if not source.write_subs:
+            raise ValueError("Downloader-managed subtitle recovery requires source.write_subs=True")
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{dest.name}.subtitles-", dir=dest.parent
+        ) as staging_dir:
+            staged_base = Path(staging_dir) / dest.name
+            opts = {
+                **self._common_options(source, staged_base, settings),
+                "overwrites": True,
+                "skip_download": True,
+                "writesubtitles": True,
+                "subtitleslangs": [x for x in settings.sub_langs.split(",") if x],
+                "subtitlesformat": "vtt/best",
+            }
+
+            with (
+                self._cookie_options(opts, source, settings) as opts,
+                yt_dlp.YoutubeDL(opts) as ydl,
+            ):
+                ydl.download([source.url])
+
+            staged = sorted(
+                path
+                for path in Path(staging_dir).iterdir()
+                if path.name.startswith(staged_base.name + ".") and path.suffix == ".vtt"
+            )
+            if any(not self._valid_webvtt(path) for path in staged):
+                raise RuntimeError("Managed subtitle recovery produced invalid WebVTT output")
+
+            published: list[Path] = []
+            for path in staged:
+                final_path = dest.parent / path.name
+                os.replace(path, final_path)
+                published.append(final_path)
+            return published
+
+    @staticmethod
+    def _is_regular_file(path: Path) -> bool:
+        try:
+            return stat.S_ISREG(path.lstat().st_mode)
+        except OSError:
+            return False
+
+    @classmethod
+    def _valid_webvtt(cls, path: Path) -> bool:
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_SUBTITLE_BYTES:
+                return False
+            with path.open("rb") as subtitle_file:
+                content = subtitle_file.read(_MAX_SUBTITLE_BYTES + 1)
+            if len(content) > _MAX_SUBTITLE_BYTES:
+                return False
+            content.decode("utf-8")
+        except OSError, UnicodeDecodeError:
+            return False
+
+        if content.startswith(b"\xef\xbb\xbf"):
+            content = content[3:]
+        content = content.lstrip(_ASCII_WHITESPACE)
+        return content == b"WEBVTT" or (
+            content.startswith(b"WEBVTT") and content[6:7] in _ASCII_WHITESPACE
+        )
 
     def _run_drm(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
         """Download encrypted media and decrypt via prove_decrypt_path."""
@@ -156,27 +262,21 @@ class YtDlpDownloader(Downloader):
         device_path = Path(settings.drm_device)
         if not device_path.is_file():
             raise RuntimeError(
-                f"Device file not found: {device_path}. "
-                "Provide a valid .wvd file via --drm-device."
+                f"Device file not found: {device_path}. Provide a valid .wvd file via --drm-device."
             )
 
         # Build Cookie header from source cookies for the license POST.
         extra_headers: dict[str, str] = {}
         if source.cookie_jar:
-            cookie_str = "; ".join(
-                f"{c.name}={c.value}"
-                for c in source.cookie_jar
-            )
+            cookie_str = "; ".join(f"{c.name}={c.value}" for c in source.cookie_jar)
             extra_headers["Cookie"] = cookie_str
         elif source.cookies:
-            extra_headers["Cookie"] = "; ".join(
-                f"{k}={v}" for k, v in source.cookies.items()
-            )
+            extra_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in source.cookies.items())
         extra_headers.setdefault("Referer", "https://www.udemy.com/")
 
         # Isolate each attempt so a retry never consumes a previous attempt's files.
         staging_id = uuid.uuid4().hex
-        outtmpl = str(dest.with_suffix("")) + f".encrypted.{staging_id}.%(ext)s"
+        outtmpl = str(dest) + f".encrypted.{staging_id}.%(ext)s"
 
         cookiefile: str | None = None
         try:
@@ -248,7 +348,7 @@ class YtDlpDownloader(Downloader):
             raise RuntimeError(f"DRM license input error: {exc}") from exc
 
         # Decrypt via the proof pipeline.
-        final_output = dest.with_suffix(".mp4")
+        final_output = dest.parent / f"{dest.name}.mp4"
         try:
             result = asyncio.run(
                 prove_decrypt_path(
@@ -277,7 +377,7 @@ class YtDlpDownloader(Downloader):
     @staticmethod
     def _encrypted_artifacts(dest: Path, staging_id: str) -> list[Path]:
         """Return compatible encrypted tracks in deterministic path order."""
-        prefix = f"{dest.stem}.encrypted.{staging_id}."
+        prefix = f"{dest.name}.encrypted.{staging_id}."
         return sorted(
             [
                 path

@@ -7,13 +7,16 @@ Centraliza la creación del contexto de navegación con identidad coherente
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
+import math
 import os
 import tempfile
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
@@ -33,9 +36,7 @@ def is_udemy_cookie(cookie: Mapping[str, Any]) -> bool:
     return isinstance(domain, str) and domain.lower() in _UDEMY_COOKIE_DOMAINS
 
 
-def filter_cookies(
-    platform: str, cookies: Sequence[Mapping[str, Any]]
-) -> list[dict[str, Any]]:
+def filter_cookies(platform: str, cookies: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Devuelve solo cookies permitidas para la plataforma."""
     if platform != "udemy":
         return [dict(cookie) for cookie in cookies]
@@ -56,10 +57,8 @@ def load_cookies(platform: str) -> list[dict[str, Any]]:
         cookies = data.get("cookies", [])
         if not isinstance(cookies, list):
             return []
-        return filter_cookies(
-            platform, [cookie for cookie in cookies if isinstance(cookie, dict)]
-        )
-    except (json.JSONDecodeError, OSError):
+        return filter_cookies(platform, [cookie for cookie in cookies if isinstance(cookie, dict)])
+    except json.JSONDecodeError, OSError:
         return []
 
 
@@ -100,14 +99,12 @@ def is_cookie_usable(cookie: Mapping[str, Any], *, now: float | None = None) -> 
         return True
     try:
         expiration = float(expires)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     return expiration > (time.time() if now is None else now)
 
 
-def has_usable_session(
-    platform: str, cookies: Sequence[Mapping[str, Any]]
-) -> bool:
+def has_usable_session(platform: str, cookies: Sequence[Mapping[str, Any]]) -> bool:
     """Valida cookies de sesión sin contactar la plataforma."""
     known_names = _SESSION_COOKIE_NAMES.get(platform)
     return any(
@@ -185,6 +182,121 @@ def cookies_as_records(cookies: Sequence[Mapping[str, Any]]) -> list[Cookie]:
             )
         )
     return records
+
+
+def cookie_header_for_url(
+    cookies: Sequence[Cookie], url: str, *, now: float | None = None
+) -> str | None:
+    """Devuelve las cookies cuyo dominio, ruta y vigencia permiten enviarlas a ``url``."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        _ = parsed.port  # Valida puertos no numericos o fuera de rango.
+    except TypeError, ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or host is None
+        or any(char.isspace() or char == "\\" for char in url)
+    ):
+        return None
+
+    host = host.lower()
+
+    def valid_host(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            labels = value.split(".")
+            return len(value) <= 253 and all(
+                label
+                and len(label) <= 63
+                and label[0] != "-"
+                and label[-1] != "-"
+                and all(char.isascii() and (char.isalnum() or char == "-") for char in label)
+                for label in labels
+            )
+
+    def valid_header_cookie(cookie: Cookie) -> bool:
+        name = getattr(cookie, "name", None)
+        value = getattr(cookie, "value", None)
+        if not isinstance(name, str) or not name or not isinstance(value, str):
+            return False
+        if not all(
+            char.isascii() and (char.isalnum() or char in "!#$%&'*+-.^_`|~") for char in name
+        ):
+            return False
+        return all("\x21" <= char <= "\x7e" and char not in '",;\\' for char in value)
+
+    if not valid_host(host):
+        return None
+
+    request_path = parsed.path or "/"
+    current_time = time.time() if now is None else now
+    matches: list[Cookie] = []
+    for cookie in cookies:
+        domain_scope = getattr(cookie, "domain", None)
+        path = getattr(cookie, "path", None)
+        secure = getattr(cookie, "secure", None)
+        expires = getattr(cookie, "expires", None)
+        if (
+            not valid_header_cookie(cookie)
+            or not isinstance(domain_scope, str)
+            or not isinstance(path, str)
+            or not isinstance(secure, bool)
+            or not isinstance(expires, (int, float))
+        ):
+            continue
+
+        domain_scope = domain_scope.lower()
+        include_subdomains = domain_scope.startswith(".")
+        domain = domain_scope[1:] if include_subdomains else domain_scope
+        if not valid_host(domain):
+            continue
+
+        try:
+            ip_address = ipaddress.ip_address(host)
+        except ValueError:
+            ip_address = None
+        try:
+            domain_ip_address = ipaddress.ip_address(domain)
+        except ValueError:
+            domain_ip_address = None
+
+        domain_matches = host == domain
+        if include_subdomains and ip_address is None and domain_ip_address is None:
+            domain_matches = domain_matches or host.endswith(f".{domain}")
+        if not domain_matches:
+            continue
+
+        if (
+            not path.startswith("/")
+            or ";" in path
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in path)
+        ):
+            continue
+        if not (
+            request_path == path
+            or (
+                request_path.startswith(path)
+                and (path.endswith("/") or request_path[len(path) :].startswith("/"))
+            )
+        ):
+            continue
+        if secure and parsed.scheme != "https":
+            continue
+        if not math.isfinite(expires):
+            continue
+        if expires > 0 and expires <= current_time:
+            continue
+        matches.append(cookie)
+
+    if not matches:
+        return None
+    matches.sort(key=lambda cookie: -len(cookie.path))
+    return "; ".join(f"{cookie.name}={cookie.value}" for cookie in matches)
 
 
 @asynccontextmanager

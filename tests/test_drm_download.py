@@ -70,9 +70,7 @@ def _staged_artifact(ytdlp_cls: MagicMock, extension: str) -> Path:
 class TestYtDlpDownloaderDrm:
     """Tests for the DRM code path in YtDlpDownloader._run."""
 
-    def test_encrypted_artifacts_handles_brackets_in_destination_name(
-        self, tmp_path: Path
-    ) -> None:
+    def test_encrypted_artifacts_handles_brackets_in_destination_name(self, tmp_path: Path) -> None:
         """Literal destination metacharacters do not break staging discovery."""
         dest = tmp_path / "lesson [intro]"
         staging_id = "staging-123"
@@ -82,6 +80,37 @@ class TestYtDlpDownloaderDrm:
         video.write_bytes(b"video")
 
         assert YtDlpDownloader._encrypted_artifacts(dest, staging_id) == [audio, video]
+
+    def test_drm_preserves_dotted_logical_base(self, tmp_path: Path) -> None:
+        device = tmp_path / "device.wvd"
+        device.write_bytes(b"fake-device")
+        dest = tmp_path / "01-Node.js"
+        expected_output = tmp_path / "01-Node.js.mp4"
+        source = _make_drm_source()
+        settings = _settings(download_dir=tmp_path, drm_device=device)
+        proof_result = ProofResult(output_path=expected_output, keys=[])
+
+        with (
+            patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+            patch("evdownloader.drm.prove_decrypt_path", new_callable=AsyncMock) as mock_proof,
+            patch("evdownloader.downloaders.ytdlp.uuid.uuid4") as mock_uuid,
+        ):
+            mock_uuid.return_value.hex = "staging-123"
+            instance = MagicMock()
+            mock_ydl_cls.return_value.__enter__.return_value = instance
+            mock_ydl_cls.return_value.__exit__.return_value = False
+            instance.download.side_effect = lambda _urls: _staged_artifact(
+                mock_ydl_cls, "mp4"
+            ).write_bytes(b"encrypted")
+            mock_proof.return_value = proof_result
+
+            result = YtDlpDownloader()._run_drm(source, dest, settings)
+
+        assert mock_ydl_cls.call_args.args[0]["outtmpl"] == (
+            str(dest) + ".encrypted.staging-123.%(ext)s"
+        )
+        assert mock_proof.call_args.kwargs["output_path"] == expected_output
+        assert result == expected_output
 
     def test_drm_without_use_drm_raises(self) -> None:
         """source.drm + use_drm=False raises actionable error."""

@@ -18,12 +18,19 @@ class Downloader(ABC):
     """
 
     name: str = "base"
+    supports_managed_subtitles: bool = False
 
     @abstractmethod
-    async def download(
-        self, source: VideoSource, dest: Path, settings: Settings
-    ) -> Path:
+    async def download(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
         """Descarga el video a ``dest`` y devuelve la ruta del archivo final."""
+
+    async def download_subtitles(
+        self, source: VideoSource, dest: Path, settings: Settings
+    ) -> list[Path]:
+        """Recupera subtítulos gestionados por el motor junto a ``dest``."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support downloader-managed subtitle recovery"
+        )
 
     @staticmethod
     def _format_selector(quality: str | None) -> str:
@@ -43,8 +50,5 @@ class Downloader(ABC):
         """
         if quality:
             h = quality.rstrip("p")
-            return (
-                f"bv*[protocol^=m3u8][height<={h}]"
-                f"+ba[protocol^=m3u8]/b[protocol^=m3u8]"
-            )
+            return f"bv*[protocol^=m3u8][height<={h}]+ba[protocol^=m3u8]/b[protocol^=m3u8]"
         return "bv*[protocol^=m3u8]+ba[protocol^=m3u8]/b[protocol^=m3u8]"
