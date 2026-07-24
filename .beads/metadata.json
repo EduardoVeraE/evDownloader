@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "video_downloader",
+  "dolt_database": "evDownload",
   "project_id": "6e41fbf0-5184-4a2e-a14a-f75ad9d8b276"
 }
