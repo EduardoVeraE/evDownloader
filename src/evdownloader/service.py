@@ -69,7 +69,7 @@ class SubtitleSaveReport:
         return len(self.saved_paths)
 
 
-async def download_course(url: str, settings: Settings, *, use_cache: bool = True) -> None:
+async def download_course(url: str, settings: Settings, *, use_cache: bool = False) -> None:
     """Descarga un curso completo a ``settings.download_dir``."""
     extractor = get_extractor(url)
     extractor.configure(settings)
@@ -120,9 +120,16 @@ async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Cours
     if use_cache:
         cached = cache.get(url)
         if cached:
-            console.print("[dim]Estructura cargada desde caché.[/dim]")
-            return Course.model_validate(cached)
+            cached_course = Course.model_validate(cached)
+            if any(chapter.units for chapter in cached_course.chapters):
+                console.print("[dim]Estructura cargada desde caché.[/dim]")
+                return cached_course
     course = await extractor.list_course(ctx, url)
+    if not any(chapter.units for chapter in course.chapters):
+        raise ValueError(
+            "No se encontraron unidades descargables. Verifica el acceso al curso "
+            "e inténtalo de nuevo."
+        )
     cache.set(url, course.model_dump())
     return course
 

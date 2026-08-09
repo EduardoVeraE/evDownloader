@@ -150,14 +150,28 @@ class UdemyExtractor(Extractor):
         )
         headers = self._api_headers()
         results: list[dict[str, Any]] = []
+        visited: set[str] = set()
         while url:
+            if url in visited:
+                raise ValueError("Udemy devolvió una paginación de currículum inválida.")
+            visited.add(url)
             try:
                 resp = await self._rnet_client().get(url, headers=headers)
                 data = json.loads(await resp.text())
-            except Exception:  # noqa: BLE001
-                break
-            results.extend(data.get("results") or [])
-            url = data.get("next")
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    "No se pudo obtener el currículum de Udemy. Inténtalo de nuevo."
+                ) from exc
+            if not isinstance(data, dict):
+                raise ValueError("Udemy devolvió un currículum con formato inválido.")
+            page = data.get("results")
+            next_url = data.get("next")
+            if not isinstance(page, list) or not all(isinstance(item, dict) for item in page):
+                raise ValueError("Udemy devolvió un currículum con formato inválido.")
+            if next_url is not None and not isinstance(next_url, str):
+                raise ValueError("Udemy devolvió una paginación de currículum inválida.")
+            results.extend(page)
+            url = next_url
         return results
 
     def _build_course(

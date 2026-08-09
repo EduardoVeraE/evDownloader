@@ -153,8 +153,8 @@ def download(
     limit: int | None = typer.Option(
         None, "-n", "--limit", help="Descargar solo las primeras N clases de video."
     ),
-    no_cache: bool = typer.Option(
-        False, "--no-cache", help="Ignorar la caché de estructura del curso."
+    cache: bool = typer.Option(
+        False, "--cache", help="Usar la caché de estructura del curso."
     ),
     no_resources: bool = typer.Option(
         False, "--no-resources", help="No descargar resumen, adjuntos, enlaces ni MHTML."
@@ -211,7 +211,7 @@ def download(
         drm_token=drm_token,
         drm_device=drm_device,
     )
-    asyncio.run(service.download_course(url, settings, use_cache=not no_cache))
+    asyncio.run(service.download_course(url, settings, use_cache=cache))
 
 
 @app.command("clear-cache")

@@ -140,6 +140,51 @@ def test_build_course_leccion_suelta_sin_capitulo() -> None:
     assert len(course.chapters[0].units) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    ["not-json", "[]", "{}", '{"results": {}}', '{"results": [], "next": 1}'],
+)
+async def test_fetch_curriculum_rejects_invalid_page_payload(body: str) -> None:
+    response = AsyncMock()
+    response.text.return_value = body
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="currículum"):
+        await extractor._fetch_curriculum("42")
+
+
+@pytest.mark.asyncio
+async def test_fetch_curriculum_rejects_request_failure() -> None:
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.side_effect = RuntimeError("secret request details")
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="Inténtalo de nuevo") as error:
+        await extractor._fetch_curriculum("42")
+
+    assert "secret request details" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_curriculum_discards_results_when_later_page_fails() -> None:
+    first = AsyncMock()
+    first.text.return_value = json.dumps(
+        {"results": [_lecture("1", "Intro")], "next": "https://example.test/page/2"}
+    )
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.side_effect = [first, RuntimeError("second page failed")]
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="Inténtalo de nuevo"):
+        await extractor._fetch_curriculum("42")
+
+
 # -- list_course exige una fuente de credenciales -----------------------------
 def test_list_course_sin_cookies_lanza() -> None:
     ex = UdemyExtractor()  # sin sesión persistida ni cookies_from_browser

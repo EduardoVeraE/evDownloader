@@ -1,8 +1,33 @@
+from unittest.mock import AsyncMock, patch
+
+import pytest
 from typer.testing import CliRunner
 
 from evdownloader import __version__, cli
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize(("extra_args", "expected"), [([], False), (["--cache"], True)])
+def test_download_cache_is_explicit_opt_in(extra_args: list[str], expected: bool) -> None:
+    download_course = AsyncMock()
+
+    with (
+        patch("evdownloader.cli.ensure_dirs"),
+        patch("evdownloader.service.download_course", download_course),
+    ):
+        result = runner.invoke(cli.app, ["download", "https://example.test/course", *extra_args])
+
+    assert result.exit_code == 0
+    assert download_course.await_args.kwargs["use_cache"] is expected
+
+
+def test_download_help_exposes_cache_opt_in_only() -> None:
+    result = runner.invoke(cli.app, ["download", "--help"])
+
+    assert result.exit_code == 0
+    assert "--cache" in result.stdout
+    assert "--no-cache" not in result.stdout
 
 
 def test_version_option_shows_installed_version() -> None:

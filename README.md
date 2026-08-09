@@ -246,7 +246,7 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 | `-d`, `--downloader` | Motor: `ytdlp` (por defecto) o `native` (rnet + FFmpeg) |
 | `-w`, `--overwrite` | Sobrescribir archivos existentes |
 | `-n`, `--limit` | Descargar solo las primeras N clases de video |
-| `--no-cache` | Ignorar la caché de estructura del curso |
+| `--cache` | Usar la estructura guardada en caché (por defecto se obtiene una estructura nueva) |
 | `--no-resources` | No descargar resumen, adjuntos, enlaces ni MHTML |
 | `--cookies-from-browser` | Navegador del que leer cookies (`brave`, `chrome`, `safari`…). Fallback para Udemy; requerido si no hay sesión persistida |
 | `--sub-langs` | Idiomas de subtítulos (yt-dlp): `all`, `es,en`, `es.*`… |

@@ -10,8 +10,23 @@ import pytest
 from rich.console import Console
 
 from evdownloader.config import Settings
-from evdownloader.models import Resource, ResourceKind, Subtitle, Unit, UnitExtras, VideoSource
-from evdownloader.service import _download_files, _download_video, _save_extras
+from evdownloader.models import (
+    Chapter,
+    Course,
+    Resource,
+    ResourceKind,
+    Subtitle,
+    Unit,
+    UnitExtras,
+    VideoSource,
+)
+from evdownloader.service import (
+    _download_files,
+    _download_video,
+    _load_structure,
+    _save_extras,
+    download_course,
+)
 
 
 def _unit() -> Unit:
@@ -33,6 +48,56 @@ def _manifest(base: Path) -> dict[str, object]:
 
 def _write_manifest(base: Path, payload: object) -> None:
     (base.parent / f"{base.name}.subtitles.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_download_course_fetches_fresh_structure_by_default(tmp_path: Path) -> None:
+    extractor = MagicMock(needs_browser=False)
+    extractor.name = "test"
+    downloader = MagicMock()
+
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=downloader),
+        patch("evdownloader.service._run_download", new=AsyncMock()) as run_download,
+    ):
+        await download_course("https://example.test/course", Settings(download_dir=tmp_path))
+
+    assert run_download.await_args.kwargs["use_cache"] is False
+
+
+@pytest.mark.asyncio
+async def test_load_structure_ignores_empty_cached_course_and_refetches() -> None:
+    url = "https://example.test/course"
+    empty = Course(title="Cached", url=url)
+    fresh = Course(title="Fresh", url=url, chapters=[Chapter(title="One", units=[_unit()])])
+    extractor = MagicMock()
+    extractor.list_course = AsyncMock(return_value=fresh)
+
+    with (
+        patch("evdownloader.service.cache.get", return_value=empty.model_dump()),
+        patch("evdownloader.service.cache.set") as cache_set,
+    ):
+        result = await _load_structure(extractor, None, url, use_cache=True)
+
+    assert result == fresh
+    extractor.list_course.assert_awaited_once_with(None, url)
+    cache_set.assert_called_once_with(url, fresh.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_load_structure_rejects_fresh_empty_course_without_caching() -> None:
+    url = "https://example.test/course"
+    extractor = MagicMock()
+    extractor.list_course = AsyncMock(return_value=Course(title="Empty", url=url))
+
+    with (
+        patch("evdownloader.service.cache.set") as cache_set,
+        pytest.raises(ValueError, match="No se encontraron unidades descargables"),
+    ):
+        await _load_structure(extractor, None, url, use_cache=False)
+
+    cache_set.assert_not_called()
 
 
 @pytest.fixture
