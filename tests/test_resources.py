@@ -18,6 +18,15 @@ def test_recurso_externo_es_enlace() -> None:
     assert PlatziExtractor._resource_kind("https://www.google.com/chrome/") is ResourceKind.LINK
 
 
+def test_hostname_enganoso_de_platzi_es_enlace() -> None:
+    deceptive = (
+        "https://static.platzi.com.evil.test/file.zip",
+        "https://evil.test/static.platzi.com/file.zip",
+        "https://evil.test/file.zip?next=https://static.platzi.com/file.zip",
+    )
+    assert all(PlatziExtractor._resource_kind(url) is ResourceKind.LINK for url in deceptive)
+
+
 def test_filename_usa_basename_de_url() -> None:
     url = "https://static.platzi.com/media/uploads/pagina_html_6c81946fbc.zip?updated_at=x"
     assert _filename_from_url(url, "pagina.html | Recurso") == "pagina_html_6c81946fbc.zip"

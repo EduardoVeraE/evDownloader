@@ -232,6 +232,7 @@ async def test_dotted_base_service_extras_append_suffixes(tmp_path: Path) -> Non
         kind=ResourceKind.FILE,
     )
     extractor = MagicMock()
+    extractor.resource_host_suffixes = ("example.test",)
     extractor.resolve_extras = AsyncMock(
         return_value=UnitExtras(
             summary_html="<p>Summary</p>",
@@ -254,7 +255,9 @@ async def test_dotted_base_service_extras_append_suffixes(tmp_path: Path) -> Non
     assert (tmp_path / "01-Node.js.mhtml").read_text(encoding="utf-8") == "MHTML"
     assert (tmp_path / "01-Node.js.enlaces.md").exists()
     assert not (tmp_path / "01-Node.resumen.html").exists()
-    download_files.assert_awaited_once_with([file_resource], tmp_path / "01-Node.js-recursos", {})
+    download_files.assert_awaited_once_with(
+        [file_resource], tmp_path / "01-Node.js-recursos", [], ("example.test",)
+    )
 
 
 @pytest.mark.asyncio
@@ -850,19 +853,16 @@ async def test_invalid_or_traversal_manifest_is_treated_as_legacy(
 
 
 @pytest.mark.asyncio
-async def test_resource_download_uses_default_client_timeouts(tmp_path: Path) -> None:
-    response = MagicMock()
-    response.bytes = AsyncMock(return_value=b"resource")
-    client = MagicMock()
-    client.get = AsyncMock(return_value=response)
+async def test_resource_download_uses_extractor_policy(tmp_path: Path) -> None:
     resource = Resource(
         title="notes.txt",
         url="https://example.test/notes.txt",
         kind=ResourceKind.FILE,
     )
 
-    with patch("evdownloader.service.rnet.Client", return_value=client) as client_factory:
-        await _download_files([resource], tmp_path, {})
+    with patch("evdownloader.service.download_resource", new_callable=AsyncMock) as download:
+        download.return_value.ok = True
+        await _download_files([resource], tmp_path, [], ("example.test",))
 
-    assert set(client_factory.call_args.kwargs) == {"impersonate"}
-    assert (tmp_path / "notes.txt").read_bytes() == b"resource"
+    assert download.await_args.kwargs["cookie_jar"] == []
+    assert download.await_args.kwargs["trusted_host_suffixes"] == ("example.test",)

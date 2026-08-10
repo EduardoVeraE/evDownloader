@@ -70,6 +70,9 @@ _DRM_REFRESH_BACKOFF_SECONDS = (1.0, 2.0)
 
 
 class UdemyExtractor(Extractor):
+    # Supplementary assets currently use Udemy's owned CDN. New delivery domains
+    # intentionally fail closed until reviewed instead of allowing generic CDNs.
+    resource_host_suffixes = ("udemycdn.com",)
     name = "udemy"
     # No usa navegador: delega en yt-dlp (evita el Cloudflare Turnstile).
     needs_browser = False

@@ -42,6 +42,10 @@ class Extractor(ABC):
     #: coma. Lo usan ``session.login`` y ``session.is_logged_in``.
     auth_ready_selector: str = ""
 
+    #: Provider-owned hosts allowed for direct resource downloads. Empty means
+    #: resources fail closed rather than trusting extractor-provided URLs.
+    resource_host_suffixes: tuple[str, ...] = ()
+
     def configure(self, settings: Settings) -> None:  # noqa: B027
         """Recibe los ajustes de la ejecución antes de listar/descargar.
 

@@ -117,6 +117,7 @@ def _is_media_request(url: str) -> bool:
 
 class PlatziExtractor(Extractor):
     name = "platzi"
+    resource_host_suffixes = _PLATZI_FILE_HOSTS
     login_url = LOGIN_URL
     home_url = PLATZI_BASE_URL
     # El avatar del menú de usuario solo aparece tras autenticarse.
@@ -334,7 +335,11 @@ class PlatziExtractor(Extractor):
     @staticmethod
     def _resource_kind(url: str) -> ResourceKind:
         """Distingue un archivo alojado por Platzi de un enlace externo."""
-        if any(host in url for host in _PLATZI_FILE_HOSTS):
+        try:
+            host = urlparse(url).hostname
+        except ValueError:
+            host = None
+        if host and host.lower().rstrip(".") in _PLATZI_FILE_HOSTS:
             return ResourceKind.FILE
         return ResourceKind.LINK
 

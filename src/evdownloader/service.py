@@ -25,6 +25,7 @@ from .config import RNET_IMPERSONATE, Settings
 from .downloaders import get_downloader
 from .extractors import get_extractor
 from .models import (
+    Cookie,
     Course,
     Resource,
     ResourceKind,
@@ -34,6 +35,8 @@ from .models import (
     UnitType,
     VideoSource,
 )
+from .resource_download import download_resource
+from .resource_download import exception_name as _exception_name
 from .utils import numbered, safe_mkdir, slugify
 
 console = Console()
@@ -282,10 +285,6 @@ def _subtitle_failure_label(failure: SubtitleFailure) -> str:
     return failure.reason
 
 
-def _exception_name(exc: BaseException) -> str:
-    return type(exc).__name__
-
-
 def _subtitle_manifest_path(base: Path) -> Path:
     return _artifact_path(base, ".subtitles.json")
 
@@ -447,10 +446,9 @@ async def _save_extras(extractor, ctx, unit: Unit, base: Path, settings: Setting
         )
 
     if files:
-        # Udemy no abre navegador (ctx=None); sus URLs de recurso vienen firmadas.
-        cookies = browser.cookies_as_dict(await ctx.cookies()) if ctx is not None else {}
+        cookies = browser.cookies_as_records(await ctx.cookies()) if ctx is not None else []
         res_dir = safe_mkdir(_artifact_path(base, "-recursos"))
-        await _download_files(files, res_dir, cookies)
+        await _download_files(files, res_dir, cookies, extractor.resource_host_suffixes)
 
 
 async def _save_subtitles(
@@ -576,22 +574,26 @@ async def _save_subtitles(
     )
 
 
-async def _download_files(files: list[Resource], out_dir: Path, cookies: dict[str, str]) -> None:
-    """Descarga los archivos adjuntos a ``out_dir`` con la sesión activa."""
-    client = rnet.Client(impersonate=getattr(rnet.Impersonate, RNET_IMPERSONATE, None))
-    headers: dict[str, str] = {}
-    if cookies:
-        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+async def _download_files(
+    files: list[Resource],
+    out_dir: Path,
+    cookies: list[Cookie],
+    trusted_host_suffixes: tuple[str, ...],
+) -> None:
+    """Descarga adjuntos sin revelar URLs firmadas ni credenciales en errores."""
     for res in files:
         name = _filename_from_url(res.url, res.title)
-        try:
-            resp = await client.get(res.url, headers=headers)
-            data = await resp.bytes()
-            async with aiofiles.open(out_dir / name, "wb") as f:
-                await f.write(data)
+        result = await download_resource(
+            res.url,
+            out_dir / name,
+            cookie_jar=cookies,
+            trusted_host_suffixes=trusted_host_suffixes,
+        )
+        if result.ok:
             console.print(f"  [green]·[/green] recurso: {name}")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"  [red]·[/red] falló recurso {name}: {exc}")
+        else:
+            error = f" ({result.error_name})" if result.error_name else ""
+            console.print(f"  [red]·[/red] falló recurso: {result.reason}{error}")
 
 
 def _subtitle_client():
