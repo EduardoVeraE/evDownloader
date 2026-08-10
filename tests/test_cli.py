@@ -1,6 +1,8 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from typer.core import TyperOption
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from evdownloader import __version__, cli
@@ -23,11 +25,15 @@ def test_download_cache_is_explicit_opt_in(extra_args: list[str], expected: bool
 
 
 def test_download_help_exposes_cache_opt_in_only() -> None:
-    result = runner.invoke(cli.app, ["download", "--help"], terminal_width=120)
+    download = get_command(cli.app).commands["download"]
+    options = [param for param in download.params if isinstance(param, TyperOption)]
+    cache = next(option for option in options if option.name == "cache")
 
-    assert result.exit_code == 0
-    assert "--cache" in result.stdout
-    assert "--no-cache" not in result.stdout
+    assert cache.opts == ["--cache"]
+    assert cache.default is False
+    assert "--no-cache" not in {
+        flag for option in options for flag in (*option.opts, *option.secondary_opts)
+    }
 
 
 def test_version_option_shows_installed_version() -> None:
