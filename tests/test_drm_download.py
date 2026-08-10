@@ -426,6 +426,10 @@ class TestUdemyDrmHandoff:
         """Under use_drm, source.url is the MPD, is_embed=False, write_subs=False."""
         ex = UdemyExtractor()
         ex.configure(Settings(cookies_from_browser="brave", use_drm=True))
+        ex._cookies = [
+            {"name": "access_token", "value": "token", "domain": ".udemy.com"}
+        ]
+        ex._cookies_loaded = True
         unit = Unit(
             title="x",
             url=(
@@ -467,6 +471,10 @@ class TestUdemyDrmHandoff:
     def test_non_drm_mode_preserves_defaults(self) -> None:
         """Without use_drm, URL stays as lecture page, is_embed=True, write_subs=True."""
         ex = UdemyExtractor()
+        ex._cookies = [
+            {"name": "access_token", "value": "token", "domain": ".udemy.com"}
+        ]
+        ex._cookies_loaded = True
         # No configure / use_drm defaults to False.
         unit = Unit(
             title="x",

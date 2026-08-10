@@ -23,7 +23,7 @@ def test_download_cache_is_explicit_opt_in(extra_args: list[str], expected: bool
 
 
 def test_download_help_exposes_cache_opt_in_only() -> None:
-    result = runner.invoke(cli.app, ["download", "--help"])
+    result = runner.invoke(cli.app, ["download", "--help"], terminal_width=120)
 
     assert result.exit_code == 0
     assert "--cache" in result.stdout
