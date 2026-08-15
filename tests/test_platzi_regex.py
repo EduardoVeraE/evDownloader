@@ -25,22 +25,13 @@ class FakePage:
     def __init__(
         self,
         *,
-        goto_requests: tuple[str, ...],
-        waited_media: str | None = None,
-        waited_vtt: str | None = None,
-        media_wait_error: Exception | None = None,
-        vtt_wait_error: Exception | None = None,
-        trailing_requests: tuple[str, ...] = (),
+        requests: tuple[tuple[int, str], ...],
         remove_error: Exception | None = None,
     ) -> None:
         self.listener = None
         self.events: list[str] = []
-        self.goto_requests = goto_requests
-        self.waited_media = waited_media
-        self.waited_vtt = waited_vtt
-        self.media_wait_error = media_wait_error
-        self.vtt_wait_error = vtt_wait_error
-        self.trailing_requests = trailing_requests
+        self.elapsed_ms = 0
+        self.requests = sorted(requests, key=lambda request: request[0])
         self.remove_error = remove_error
 
     def on(self, event: str, listener) -> None:
@@ -56,30 +47,30 @@ class FakePage:
         assert url == "https://platzi.com/clase/video/"
         assert wait_until == "domcontentloaded"
         self.events.append("goto")
-        for request_url in self.goto_requests:
+        while self.requests and self.requests[0][0] == 0:
+            _, request_url = self.requests.pop(0)
             self._emit(request_url)
 
     async def wait_for_event(self, event: str, predicate, timeout: int):
         assert event == "request"
-        if timeout == 20000:
-            self.events.append("media-wait:20000")
-            if self.media_wait_error:
-                raise self.media_wait_error
-            request = SimpleNamespace(url=self.waited_media)
-        else:
-            assert timeout == 6500
-            self.events.append("vtt-wait:6500")
-            if self.vtt_wait_error:
-                raise self.vtt_wait_error
-            request = SimpleNamespace(url=self.waited_vtt)
-        assert predicate(request)
-        return request
+        self.events.append(f"request-wait:{timeout}")
+        deadline = self.elapsed_ms + timeout
+        while self.requests and self.requests[0][0] <= deadline:
+            self.elapsed_ms, request_url = self.requests.pop(0)
+            request = SimpleNamespace(url=request_url)
+            self._emit(request_url)
+            if predicate(request):
+                return request
+        self.elapsed_ms = deadline
+        raise PlaywrightTimeoutError("request timed out")
 
     async def wait_for_timeout(self, timeout: int) -> None:
-        assert timeout == 1500
-        self.events.append("trailing:1500")
-        for request_url in self.trailing_requests:
+        self.events.append(f"trailing:{timeout}")
+        deadline = self.elapsed_ms + timeout
+        while self.requests and self.requests[0][0] <= deadline:
+            self.elapsed_ms, request_url = self.requests.pop(0)
             self._emit(request_url)
+        self.elapsed_ms = deadline
 
     def remove_listener(self, event: str, listener) -> None:
         assert event == "request"
@@ -167,9 +158,11 @@ def test_embed_extrae_id() -> None:
 @pytest.mark.asyncio
 async def test_resolve_video_vtt_temprano_espera_media_antes_de_colectar() -> None:
     page = FakePage(
-        goto_requests=("https://cdn.mdstrm.com/subtitles/es-early.vtt",),
-        waited_media="https://mdstrm.com/embed/video-1",
-        trailing_requests=("https://cdn.mdstrm.com/subtitles/en-trailing.vtt",),
+        requests=(
+            (0, "https://cdn.mdstrm.com/subtitles/es-early.vtt"),
+            (20_000, "https://mdstrm.com/embed/video-1"),
+            (20_003, "https://cdn.mdstrm.com/subtitles/en-trailing.vtt"),
+        ),
     )
 
     source = await resolve_with(page)
@@ -181,11 +174,12 @@ async def test_resolve_video_vtt_temprano_espera_media_antes_de_colectar() -> No
         "https://cdn.mdstrm.com/subtitles/es-early.vtt",
     ]
     assert [subtitle.lang for subtitle in source.subtitles] == ["es", "es"]
+    assert page.elapsed_ms == 20_250
     assert page.events == [
         "listener:on",
         "goto",
-        "media-wait:20000",
-        "trailing:1500",
+        "request-wait:20000",
+        "trailing:250",
         "listener:off",
         "close",
     ]
@@ -195,10 +189,14 @@ async def test_resolve_video_vtt_temprano_espera_media_antes_de_colectar() -> No
 async def test_resolve_video_media_tardia_espera_vtt_y_colecta_rafaga() -> None:
     media_url = "https://mdstrm.com/video/abc/master.m3u8"
     page = FakePage(
-        goto_requests=(),
-        waited_media=media_url,
-        waited_vtt="https://cdn.mdstrm.com/subtitles/pt-first.vtt",
-        trailing_requests=("https://cdn.mdstrm.com/subtitles/es-trailing.vtt",),
+        requests=(
+            (1, "https://cdn.mdstrm.com/subtitles/ignored.vtt.m3u8"),
+            (20_000, media_url),
+            (26_499, "https://mdstrm.com.evil.example/subtitles/untrusted.vtt"),
+            (26_500, "https://cdn.mdstrm.com/subtitles/pt-first.vtt"),
+            (26_501, "https://cdn.mdstrm.com/subtitles/pt-first.vtt"),
+            (26_503, "https://cdn.mdstrm.com/subtitles/es-trailing.vtt"),
+        ),
     )
 
     source = await resolve_with(page)
@@ -209,12 +207,14 @@ async def test_resolve_video_media_tardia_espera_vtt_y_colecta_rafaga() -> None:
         "https://cdn.mdstrm.com/subtitles/es-trailing.vtt",
         "https://cdn.mdstrm.com/subtitles/pt-first.vtt",
     ]
+    assert [subtitle.lang for subtitle in source.subtitles] == ["es", "es"]
+    assert page.elapsed_ms == 26_750
     assert page.events == [
         "listener:on",
         "goto",
-        "media-wait:20000",
-        "vtt-wait:6500",
-        "trailing:1500",
+        "request-wait:20000",
+        "request-wait:6500",
+        "trailing:250",
         "listener:off",
         "close",
     ]
@@ -223,20 +223,18 @@ async def test_resolve_video_media_tardia_espera_vtt_y_colecta_rafaga() -> None:
 @pytest.mark.asyncio
 async def test_resolve_video_media_en_goto_sin_vtt_no_colecta() -> None:
     media_url = "https://mdstrm.com/video/abc/master.m3u8"
-    page = FakePage(
-        goto_requests=(media_url,),
-        vtt_wait_error=PlaywrightTimeoutError("no subtitles"),
-    )
+    page = FakePage(requests=((0, media_url),))
 
     source = await resolve_with(page)
 
     assert source is not None
     assert source.url == media_url
     assert source.subtitles == []
+    assert page.elapsed_ms == 6_500
     assert page.events == [
         "listener:on",
         "goto",
-        "vtt-wait:6500",
+        "request-wait:6500",
         "listener:off",
         "close",
     ]
@@ -245,21 +243,22 @@ async def test_resolve_video_media_en_goto_sin_vtt_no_colecta() -> None:
 @pytest.mark.asyncio
 async def test_resolve_video_media_y_vtt_en_goto_solo_colecta_rafaga() -> None:
     page = FakePage(
-        goto_requests=(
-            "https://mdstrm.com/embed/video-1",
-            "https://cdn.mdstrm.com/subtitles/es-early.vtt",
+        requests=(
+            (0, "https://mdstrm.com/embed/video-1"),
+            (0, "https://cdn.mdstrm.com/subtitles/es-early.vtt"),
+            (3, "https://cdn.mdstrm.com/subtitles/en-trailing.vtt"),
         ),
-        trailing_requests=("https://cdn.mdstrm.com/subtitles/en-trailing.vtt",),
     )
 
     source = await resolve_with(page)
 
     assert source is not None
     assert len(source.subtitles) == 2
+    assert page.elapsed_ms == 250
     assert page.events == [
         "listener:on",
         "goto",
-        "trailing:1500",
+        "trailing:250",
         "listener:off",
         "close",
     ]
@@ -268,9 +267,9 @@ async def test_resolve_video_media_y_vtt_en_goto_solo_colecta_rafaga() -> None:
 @pytest.mark.asyncio
 async def test_resolve_video_cierra_pagina_si_falla_remove_listener() -> None:
     page = FakePage(
-        goto_requests=(
-            "https://mdstrm.com/embed/video-1",
-            "https://cdn.mdstrm.com/subtitles/es.vtt",
+        requests=(
+            (0, "https://mdstrm.com/embed/video-1"),
+            (0, "https://cdn.mdstrm.com/subtitles/es.vtt"),
         ),
         remove_error=RuntimeError("remove failed"),
     )
@@ -281,7 +280,7 @@ async def test_resolve_video_cierra_pagina_si_falla_remove_listener() -> None:
     assert page.events == [
         "listener:on",
         "goto",
-        "trailing:1500",
+        "trailing:250",
         "listener:off",
         "close",
     ]
