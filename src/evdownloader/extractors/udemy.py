@@ -76,6 +76,7 @@ class UdemyExtractor(Extractor):
     # intentionally fail closed until reviewed instead of allowing generic CDNs.
     resource_host_suffixes = ("udemycdn.com",)
     name = "udemy"
+    structure_cache_revision = "articles-v1"
     # No usa navegador: delega en yt-dlp (evita el Cloudflare Turnstile).
     needs_browser = False
     login_url = UDEMY_LOGIN_URL
@@ -198,7 +199,7 @@ class UdemyExtractor(Extractor):
             visited.add(url)
             try:
                 resp = await self._rnet_client().get(url, headers=headers)
-                data = json.loads(await resp.text())
+                data = json.loads(await self._response_text(resp))
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(
                     "No se pudo obtener el currículum de Udemy. Inténtalo de nuevo."
@@ -225,9 +226,9 @@ class UdemyExtractor(Extractor):
     ) -> Course:
         """Agrupa el currículum de la API 2.0 en capítulos.
 
-        Cada lección de video se emite como una URL "smuggleada" con el
-        ``course_id`` (formato idéntico al de yt-dlp), para que el downloader la
-        resuelva sin scrapear el HTML del curso.
+        Cada video o artículo se emite como una URL "smuggleada" con el
+        ``course_id`` (formato idéntico al de yt-dlp). Los artículos conservan su
+        lugar en el currículum y resuelven su cuerpo solo cuando se piden extras.
         """
         from yt_dlp.utils import smuggle_url
 
@@ -236,7 +237,7 @@ class UdemyExtractor(Extractor):
         course_path = urlsplit(url).path.strip("/").split("/")[0] or "course"
         chapters: list[Chapter] = []
         current: Chapter | None = None
-        unit_index = 0
+        lecture_index = 0
 
         for entry in items:
             clazz = entry.get("_class")
@@ -251,8 +252,10 @@ class UdemyExtractor(Extractor):
             if clazz != "lecture":
                 continue
 
+            lecture_index += 1
             asset = entry.get("asset") or {}
-            if (asset.get("asset_type") or asset.get("assetType")) != "Video":
+            unit_type = self._classify_asset(asset)
+            if unit_type is None:
                 continue
             lecture_id = entry.get("id")
             if not lecture_id:
@@ -262,21 +265,29 @@ class UdemyExtractor(Extractor):
                 current = Chapter(title="Sección 1", index=1, units=[])
                 chapters.append(current)
 
-            unit_index += 1
             lecture_url = smuggle_url(
                 f"https://www.udemy.com/{course_path}/learn/v4/t/lecture/{lecture_id}",
                 {"course_id": str(course_id)},
             )
             current.units.append(
                 Unit(
-                    title=(entry.get("title") or f"Clase {unit_index}").strip(),
+                    title=(entry.get("title") or f"Clase {lecture_index}").strip(),
                     url=lecture_url,
-                    type=UnitType.VIDEO,
-                    index=unit_index,
+                    type=unit_type,
+                    index=lecture_index,
                 )
             )
 
         return Course(title=title, url=url, chapters=chapters)
+
+    @staticmethod
+    def _classify_asset(asset: Mapping[str, Any]) -> UnitType | None:
+        asset_type = asset.get("asset_type") or asset.get("assetType")
+        if asset_type == "Video":
+            return UnitType.VIDEO
+        if asset_type == "Article":
+            return UnitType.LECTURE
+        return None
 
     # -- Resolución de la fuente de video -----------------------------------
     async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
@@ -395,7 +406,7 @@ class UdemyExtractor(Extractor):
         )
         try:
             resp = await self._rnet_client().get(url, headers=self._api_headers())
-            data = json.loads(await resp.text())
+            data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
             return {}
         asset = data.get("asset")
@@ -413,7 +424,7 @@ class UdemyExtractor(Extractor):
     async def resolve_extras(
         self, ctx: BrowserContext | None, unit: Unit, *, capture_page: bool = False
     ) -> UnitExtras:
-        """Recursos suplementarios de la lección (adjuntos y enlaces externos).
+        """Cuerpo de artículos y recursos suplementarios de la lección.
 
         Se consultan en la API 2.0 de Udemy con las cookies del navegador. Las
         URLs de descarga que devuelve Udemy están firmadas (no requieren cookies
@@ -424,8 +435,30 @@ class UdemyExtractor(Extractor):
         course_id, lecture_id = self._ids_from_url(unit.url)
         if not course_id or not lecture_id:
             return UnitExtras()
-        assets = await self._fetch_supplementary(course_id, lecture_id)
-        return UnitExtras(resources=self._assets_to_resources(assets))
+        details = await self._fetch_lecture_details(
+            course_id, lecture_id, include_article=unit.type is UnitType.LECTURE
+        )
+        assets = details.get("supplementary_assets")
+        if not isinstance(assets, list):
+            assets = []
+
+        summary_html: str | None = None
+        primary_asset = details.get("asset")
+        if (
+            unit.type is UnitType.LECTURE
+            and isinstance(primary_asset, dict)
+            and self._classify_asset(primary_asset) is UnitType.LECTURE
+        ):
+            body = primary_asset.get("body")
+            if isinstance(body, str) and body:
+                summary_html = body
+
+        return UnitExtras(
+            summary_html=summary_html,
+            resources=self._assets_to_resources(
+                [asset for asset in assets if isinstance(asset, dict)]
+            ),
+        )
 
     @staticmethod
     def _ids_from_url(url: str) -> tuple[str | None, str | None]:
@@ -485,7 +518,7 @@ class UdemyExtractor(Extractor):
         }
         try:
             resp = await self._rnet_client().get(url, headers=headers, allow_redirects=True)
-            return await resp.text()
+            return await self._response_text(resp)
         except Exception:  # noqa: BLE001
             return ""
 
@@ -501,23 +534,42 @@ class UdemyExtractor(Extractor):
         url = f"https://www.udemy.com/api-2.0/courses/{course_id}/?fields[course]=title"
         try:
             resp = await self._rnet_client().get(url, headers=self._api_headers())
-            data = json.loads(await resp.text())
+            data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
             return None
         return (data.get("title") or "").strip() or None
 
-    async def _fetch_supplementary(self, course_id: str, lecture_id: str) -> list[dict[str, Any]]:
+    async def _fetch_lecture_details(
+        self, course_id: str, lecture_id: str, *, include_article: bool
+    ) -> dict[str, Any]:
+        lecture_fields = "asset,supplementary_assets" if include_article else "supplementary_assets"
+        asset_fields = "asset_type,title,filename,download_urls,external_url"
+        if include_article:
+            asset_fields += ",body"
+        params = urlencode(
+            {
+                "fields[lecture]": lecture_fields,
+                "fields[asset]": asset_fields,
+            }
+        )
         url = (
             f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/{course_id}"
-            f"/lectures/{lecture_id}/?fields[lecture]=supplementary_assets"
-            f"&fields[asset]=asset_type,title,filename,download_urls,external_url"
+            f"/lectures/{lecture_id}/?{params}"
         )
         try:
             resp = await self._rnet_client().get(url, headers=self._api_headers())
-            data = json.loads(await resp.text())
+            data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
-            return []
-        return data.get("supplementary_assets") or []
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    async def _response_text(response: Any) -> str:
+        try:
+            return await response.text()
+        finally:
+            with contextlib.suppress(Exception):
+                await response.close()
 
     def _rnet_client(self) -> rnet.Client:
         if self._client is None:
