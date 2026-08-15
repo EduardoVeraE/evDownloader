@@ -34,19 +34,25 @@ _SESSION_COOKIES: dict[str, list[str]] = {
 }
 
 
-def _has_valid_auth_cookie(
-    platform: str, cookies: Sequence[Mapping[str, Any]]
-) -> bool:
+def _has_valid_auth_cookie(platform: str, cookies: Sequence[Mapping[str, Any]]) -> bool:
     return browser.has_usable_session(platform, cookies)
 
 
 async def _poll_auth_cookie(
-    ctx: BrowserContext, platform: str, *, interval: float = 2.0
+    ctx: BrowserContext, extractor: Any, platform: str, *, interval: float = 2.0
 ) -> bool:
-    """Espera (polling) a que aparezca una cookie de sesión conocida en el contexto."""
+    """Espera (polling) a una sesión de la plataforma realmente autenticada.
+
+    No basta con que la cookie de sesión exista: algunas plataformas (Udemy)
+    emiten un ``access_token`` de invitado antes del login. Cuando el extractor
+    sabe verificar la sesión (``verify_session``), se exige su confirmación; de
+    lo contrario se confía en la presencia de la cookie.
+    """
     while True:
         cookies = await ctx.cookies()
-        if _has_valid_auth_cookie(platform, cookies):
+        if _has_valid_auth_cookie(platform, cookies) and (
+            await extractor.verify_session(cookies) is not False
+        ):
             return True
         await asyncio.sleep(interval)
 
@@ -73,9 +79,7 @@ async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
     """
     extractor = get_extractor_by_name(platform)
     console.print(f"[cyan]Abriendo navegador para iniciar sesión en {platform}...[/cyan]")
-    console.print(
-        f"[yellow]Tienes {timeout_s}s para iniciar sesión manualmente.[/yellow]"
-    )
+    console.print(f"[yellow]Tienes {timeout_s}s para iniciar sesión manualmente.[/yellow]")
 
     async with browser.browser_context(headless=False, with_session=False) as ctx:
         page = await ctx.new_page()
@@ -91,7 +95,7 @@ async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
             asyncio.create_task(_poll_login_redirect(page)),
         ]
         if _SESSION_COOKIES.get(platform):
-            tasks.append(asyncio.create_task(_poll_auth_cookie(ctx, platform)))
+            tasks.append(asyncio.create_task(_poll_auth_cookie(ctx, extractor, platform)))
         done, pending = await asyncio.wait(
             tasks, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
         )
@@ -114,8 +118,13 @@ async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
         cookies = browser.filter_cookies(platform, await ctx.cookies())
         if _SESSION_COOKIES.get(platform) and not _has_valid_auth_cookie(platform, cookies):
             console.print(
-                "[red]El inicio de sesión no produjo una cookie válida. "
-                "Vuelve a intentarlo.[/red]"
+                "[red]El inicio de sesión no produjo una cookie válida. Vuelve a intentarlo.[/red]"
+            )
+            return False
+        if await extractor.verify_session(cookies) is False:
+            console.print(
+                "[red]La sesión detectada es anónima (aún no has iniciado "
+                "sesión). Vuelve a intentarlo.[/red]"
             )
             return False
         browser.save_cookies(cookies, platform)

@@ -27,8 +27,10 @@ núcleo lo registra como fallo de esa clase y continúa con el resto.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qs, unquote_plus, urlencode, urlsplit
 
@@ -120,6 +122,42 @@ class UdemyExtractor(Extractor):
         items = await self._fetch_curriculum(course_id)
         title = await self._fetch_course_title(course_id)
         return self._build_course(url, course_id, items, title_override=title)
+
+    async def verify_session(self, cookies: Sequence[Mapping[str, Any]]) -> bool | None:
+        """Confirma con la API 2.0 que las cookies son de una sesión real.
+
+        Udemy emite un ``access_token`` de invitado apenas se carga la página,
+        antes del login. Verificar contra ``/users/me/`` evita aceptar (y
+        persistir) esa sesión anónima: solo devuelve ``True`` si la API
+        reconoce a un usuario autenticado.
+        """
+        header = "; ".join(
+            f"{cookie['name']}={cookie['value']}"
+            for cookie in cookies
+            if browser.is_udemy_cookie(cookie) and cookie.get("name") and cookie.get("value")
+        )
+        if not header:
+            return False
+        headers = {
+            "Cookie": header,
+            "Referer": "https://www.udemy.com/",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            resp = await self._rnet_client().get(
+                f"{UDEMY_BASE_URL}/api-2.0/users/me/?fields[user]=id",
+                headers=headers,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            data = json.loads(await resp.text())
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            with contextlib.suppress(Exception):
+                await resp.close()
+        return isinstance(data, dict) and data.get("_class") == "user" and bool(data.get("id"))
 
     async def _resolve_course_id(self, url: str) -> str | None:
         """Obtiene el course_id del query de la URL o de la página del curso.
@@ -241,9 +279,7 @@ class UdemyExtractor(Extractor):
         return Course(title=title, url=url, chapters=chapters)
 
     # -- Resolución de la fuente de video -----------------------------------
-    async def resolve_video(
-        self, ctx: BrowserContext | None, unit: Unit
-    ) -> VideoSource | None:
+    async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
         cookies = self._load_cookies(required=True)
@@ -502,7 +538,10 @@ class UdemyExtractor(Extractor):
         return self._cookie_header
 
     def _load_cookies(self, *, required: bool = False) -> list[dict[str, Any]]:
-        """Carga una única fuente de cookies, priorizando la sesión persistida."""
+        """Prioriza cookies frescas del navegador configurado.
+
+        Usa la sesión persistida como respaldo si el navegador no aporta una sesión utilizable.
+        """
         if not self._cookies_loaded:
             try:
                 self._cookies = browser.filter_cookies(

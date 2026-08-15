@@ -141,13 +141,20 @@ def load_browser_cookies(browser_name: str) -> list[dict[str, Any]]:
 
 
 def resolve_cookies(platform: str, browser_name: str | None = None) -> list[dict[str, Any]]:
-    """Usa la sesión persistida y cae explícitamente al navegador si hace falta."""
+    """Prioriza la sesión más reciente para trabajar con un token fresco.
+
+    Cuando se indica un navegador (``--cookies-from-browser``), su sesión viva es
+    la fuente más reciente y gana sobre la persistida, que puede haber quedado
+    obsoleta (un token viejo tapando el del navegador). La persistida se usa como
+    respaldo si el navegador no aporta una sesión utilizable.
+    """
+    if browser_name:
+        from_browser = filter_cookies(platform, load_browser_cookies(browser_name))
+        if has_usable_session(platform, from_browser):
+            return from_browser
     persisted = filter_cookies(platform, load_cookies(platform))
     if has_usable_session(platform, persisted):
         return persisted
-    if browser_name:
-        fallback = filter_cookies(platform, load_browser_cookies(browser_name))
-        return fallback if has_usable_session(platform, fallback) else []
     return []
 
 

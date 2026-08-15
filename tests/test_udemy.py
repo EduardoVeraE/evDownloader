@@ -101,9 +101,7 @@ def test_build_course_agrupa_por_capitulo_e_indexa() -> None:
 
 
 def test_build_course_emite_url_smuggleada_con_course_id() -> None:
-    course = UdemyExtractor()._build_course(
-        "https://www.udemy.com/course/x/", "42", _CURRICULUM
-    )
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", _CURRICULUM)
     url = course.chapters[0].units[0].url
     # yt-dlp lee el course_id del smuggle y no scrapea el HTML del curso.
     assert "/course/learn/v4/t/lecture/1" in url
@@ -311,7 +309,14 @@ def test_assets_to_resources_archivo_usa_filename() -> None:
             "title": "RECURSOS WEB.pdf",
             "filename": "RECURSOS-WEB.pdf",
             "external_url": "",
-            "download_urls": {"File": [{"label": "download", "file": "https://att-c.udemycdn.com/x/original.pdf?Signature=abc"}]},
+            "download_urls": {
+                "File": [
+                    {
+                        "label": "download",
+                        "file": "https://att-c.udemycdn.com/x/original.pdf?Signature=abc",
+                    }
+                ]
+            },
         }
     ]
     res = UdemyExtractor._assets_to_resources(assets)
@@ -323,7 +328,9 @@ def test_assets_to_resources_archivo_usa_filename() -> None:
 
 
 def test_assets_to_resources_enlace_externo() -> None:
-    assets = [{"asset_type": "ExternalLink", "title": "Repo", "external_url": "https://github.com/x"}]
+    assets = [
+        {"asset_type": "ExternalLink", "title": "Repo", "external_url": "https://github.com/x"}
+    ]
     res = UdemyExtractor._assets_to_resources(assets)
     assert len(res) == 1
     assert res[0].kind is ResourceKind.LINK
@@ -440,9 +447,7 @@ def test_drm_refresher_retries_missing_token_then_succeeds() -> None:
         refreshed = await refresh()
         assert refreshed.token == "fresh-token"
 
-    with patch(
-        "evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep:
+    with patch("evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock) as sleep:
         asyncio.run(exercise())
 
     assert fetch.await_count == 2
@@ -453,9 +458,7 @@ def test_drm_refresher_raises_after_transient_failures_and_empty_assets() -> Non
     """Exceptions and incomplete assets do not fall back to the old token."""
     ex = UdemyExtractor()
     current = DrmInfo(scheme="widevine", token="old-token")
-    fetch = AsyncMock(
-        side_effect=[RuntimeError("temporary"), {}, {"media_license_token": ""}]
-    )
+    fetch = AsyncMock(side_effect=[RuntimeError("temporary"), {}, {"media_license_token": ""}])
     ex._fetch_drm_asset = fetch  # type: ignore[method-assign]
 
     async def exercise() -> None:
@@ -463,9 +466,7 @@ def test_drm_refresher_raises_after_transient_failures_and_empty_assets() -> Non
         with pytest.raises(ValueError, match="fresh DRM media license token"):
             await refresh()
 
-    with patch(
-        "evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep:
+    with patch("evdownloader.extractors.udemy.asyncio.sleep", new_callable=AsyncMock) as sleep:
         asyncio.run(exercise())
 
     assert fetch.await_count == 3
@@ -602,11 +603,13 @@ def test_attach_drm_applies_default_proxy_url() -> None:
 def test_attach_drm_cli_license_server_overrides_default() -> None:
     """CLI --drm-license-server wins over the default proxy URL."""
     ex = UdemyExtractor()
-    ex.configure(Settings(
-        cookies_from_browser="brave",
-        use_drm=True,
-        drm_license_server="https://my-server.com/license",
-    ))
+    ex.configure(
+        Settings(
+            cookies_from_browser="brave",
+            use_drm=True,
+            drm_license_server="https://my-server.com/license",
+        )
+    )
     unit = Unit(
         title="x",
         url=(
@@ -631,11 +634,13 @@ def test_attach_drm_cli_license_server_overrides_default() -> None:
 def test_attach_drm_cli_token_overrides_provider_token() -> None:
     """CLI --drm-token wins over the asset-level token."""
     ex = UdemyExtractor()
-    ex.configure(Settings(
-        cookies_from_browser="brave",
-        use_drm=True,
-        drm_token="cli-token-override",
-    ))
+    ex.configure(
+        Settings(
+            cookies_from_browser="brave",
+            use_drm=True,
+            drm_token="cli-token-override",
+        )
+    )
     unit = Unit(
         title="x",
         url=(
@@ -655,3 +660,72 @@ def test_attach_drm_cli_token_overrides_provider_token() -> None:
     src = asyncio.run(ex.resolve_video(None, unit))
     assert src is not None and src.drm is not None
     assert src.drm.token == "cli-token-override"
+
+
+# -- verify_session distingue sesión real de invitado -------------------------
+_UDEMY_COOKIE = {"name": "access_token", "value": "tok", "domain": ".udemy.com"}
+
+
+def _verify_client(body: str) -> AsyncMock:
+    response = AsyncMock()
+    response.text.return_value = body
+    client = AsyncMock()
+    client.get.return_value = response
+    return client
+
+
+@pytest.mark.asyncio
+async def test_verify_session_acepta_usuario_autenticado() -> None:
+    ex = UdemyExtractor()
+    client = _verify_client(json.dumps({"_class": "user", "id": 727331}))
+    ex._client = client
+    assert await ex.verify_session([_UDEMY_COOKIE]) is True
+    client.get.return_value.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_verify_session_rechaza_token_invitado() -> None:
+    # Respuesta 403 de Udemy: dict sin usuario -> sesión anónima.
+    ex = UdemyExtractor()
+    client = _verify_client(json.dumps({"detail": "No tienes permiso."}))
+    client.get.return_value.close.side_effect = RuntimeError("synthetic close failure")
+    ex._client = client
+    assert await ex.verify_session([_UDEMY_COOKIE]) is False
+    client.get.return_value.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_verify_session_cierra_respuesta_con_json_invalido() -> None:
+    ex = UdemyExtractor()
+    client = _verify_client("not-json")
+    ex._client = client
+    assert await ex.verify_session([_UDEMY_COOKIE]) is False
+    client.get.return_value.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_verify_session_cierra_respuesta_si_falla_lectura() -> None:
+    ex = UdemyExtractor()
+    client = _verify_client("")
+    client.get.return_value.text.side_effect = RuntimeError("synthetic read failure")
+    ex._client = client
+    assert await ex.verify_session([_UDEMY_COOKIE]) is False
+    client.get.return_value.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_verify_session_sin_cookies_udemy_es_falsa() -> None:
+    ex = UdemyExtractor()
+    ex._client = _verify_client(json.dumps({"_class": "user", "id": 1}))
+    # Cookie de otro dominio: no se construye header y ni siquiera se consulta.
+    foreign = [{"name": "access_token", "value": "x", "domain": ".google.com"}]
+    assert await ex.verify_session(foreign) is False
+
+
+@pytest.mark.asyncio
+async def test_verify_session_falla_cerrado_ante_error() -> None:
+    ex = UdemyExtractor()
+    client = AsyncMock()
+    client.get.side_effect = RuntimeError("boom")
+    ex._client = client
+    assert await ex.verify_session([_UDEMY_COOKIE]) is False

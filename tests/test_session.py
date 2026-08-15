@@ -37,9 +37,7 @@ def test_is_logged_in_rechaza_token_udemy_expirado(monkeypatch) -> None:
 
 
 def test_is_logged_in_usa_cookie_local_si_playwright_no_detecta_sesion(monkeypatch) -> None:
-    cookies = [
-        {"name": "access_token", "value": "token", "domain": ".udemy.com", "expires": 0}
-    ]
+    cookies = [{"name": "access_token", "value": "token", "domain": ".udemy.com", "expires": 0}]
     monkeypatch.setattr(browser, "load_cookies", lambda platform: cookies)
     monkeypatch.setattr(
         session,
@@ -104,8 +102,12 @@ def test_poll_auth_cookie_ignora_valor_vacio_y_expirado(monkeypatch) -> None:
             ]
             return values[self.calls - 1]
 
+    async def verify(cookies) -> None:
+        return None
+
     ctx = FakeContext()
-    assert asyncio.run(session._poll_auth_cookie(ctx, "udemy", interval=0)) is True
+    extractor = SimpleNamespace(verify_session=verify)
+    assert asyncio.run(session._poll_auth_cookie(ctx, extractor, "udemy", interval=0)) is True
     assert ctx.calls == 4
 
 
@@ -114,7 +116,9 @@ def test_login_no_guarda_cookie_udemy_invalida(monkeypatch) -> None:
         session,
         "get_extractor_by_name",
         lambda platform: SimpleNamespace(
-            login_url="https://www.udemy.com/login", auth_ready_selector=".logged-in"
+            login_url="https://www.udemy.com/login",
+            auth_ready_selector=".logged-in",
+            verify_session=detected,
         ),
     )
 
@@ -165,7 +169,9 @@ def test_login_udemy_solo_guarda_cookies_de_udemy(monkeypatch) -> None:
         session,
         "get_extractor_by_name",
         lambda platform: SimpleNamespace(
-            login_url="https://www.udemy.com/login", auth_ready_selector=".logged-in"
+            login_url="https://www.udemy.com/login",
+            auth_ready_selector=".logged-in",
+            verify_session=detected,
         ),
     )
 
@@ -205,9 +211,7 @@ def test_login_udemy_solo_guarda_cookies_de_udemy(monkeypatch) -> None:
     monkeypatch.setattr(browser, "browser_context", lambda **kwargs: FakeContext())
 
     assert asyncio.run(session.login("udemy", timeout_s=1)) is True
-    assert saved == [
-        [{"name": "access_token", "value": "token", "domain": ".udemy.com"}]
-    ]
+    assert saved == [[{"name": "access_token", "value": "token", "domain": ".udemy.com"}]]
 
 
 def test_is_logged_in_platzi_no_acepta_cookie_generica_si_falla_selector(monkeypatch) -> None:
@@ -241,3 +245,54 @@ def test_is_logged_in_platzi_no_acepta_cookie_generica_si_falla_selector(monkeyp
     monkeypatch.setattr(browser, "browser_context", lambda **kwargs: FakeContext())
 
     assert asyncio.run(session.is_logged_in("platzi")) is False
+
+
+def test_login_rechaza_sesion_invitado_por_verify(monkeypatch) -> None:
+    # La detección dispara (avatar/redirect), pero verify_session confirma que la
+    # sesión es anónima -> no se guarda. Reproduce el guest access_token de Udemy.
+    async def guest(cookies) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        session,
+        "get_extractor_by_name",
+        lambda platform: SimpleNamespace(
+            login_url="https://www.udemy.com/login",
+            auth_ready_selector=".logged-in",
+            verify_session=guest,
+        ),
+    )
+
+    async def detected(*args, **kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(session, "_poll_login_redirect", detected)
+    monkeypatch.setattr(session, "_poll_auth_cookie", detected)
+
+    saved: list[object] = []
+    monkeypatch.setattr(browser, "save_cookies", lambda cookies, platform: saved.append(cookies))
+
+    class FakePage:
+        async def goto(self, url: str) -> None:
+            return None
+
+        async def wait_for_selector(self, selector: str, timeout: int) -> None:
+            raise RuntimeError("selector no disponible")
+
+    class FakeContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def new_page(self) -> FakePage:
+            return FakePage()
+
+        async def cookies(self) -> list[dict[str, object]]:
+            return [{"name": "access_token", "value": "guest", "domain": ".udemy.com"}]
+
+    monkeypatch.setattr(browser, "browser_context", lambda **kwargs: FakeContext())
+
+    assert asyncio.run(session.login("udemy", timeout_s=1)) is False
+    assert saved == []

@@ -180,11 +180,19 @@ def test_cookie_header_returns_none_when_nothing_matches() -> None:
     assert browser.cookie_header_for_url([cookie], "https://example.com", now=100) is None
 
 
-def test_resolve_cookies_prefiere_sesion_persistida(monkeypatch) -> None:
-    persisted = [
-        {"name": "access_token", "value": "persisted", "domain": ".udemy.com"},
-        {"name": "sid", "value": "third-party", "domain": ".google.com"},
-    ]
+def test_resolve_cookies_prefiere_navegador_por_frescura(monkeypatch) -> None:
+    # El navegador es la sesión viva: gana sobre la persistida aunque ambas
+    # tengan un token utilizable, para trabajar siempre con el token más fresco.
+    persisted = [{"name": "access_token", "value": "persisted", "domain": ".udemy.com"}]
+    from_browser = [{"name": "access_token", "value": "fresh", "domain": ".udemy.com"}]
+    monkeypatch.setattr(browser, "load_cookies", lambda platform: persisted)
+    monkeypatch.setattr(browser, "load_browser_cookies", lambda browser_name: from_browser)
+
+    assert browser.resolve_cookies("udemy", "brave") == from_browser
+
+
+def test_resolve_cookies_usa_persistida_sin_navegador(monkeypatch) -> None:
+    persisted = [{"name": "access_token", "value": "persisted", "domain": ".udemy.com"}]
     monkeypatch.setattr(browser, "load_cookies", lambda platform: persisted)
     monkeypatch.setattr(
         browser,
@@ -192,7 +200,16 @@ def test_resolve_cookies_prefiere_sesion_persistida(monkeypatch) -> None:
         lambda browser_name: (_ for _ in ()).throw(AssertionError("no debe usar navegador")),
     )
 
-    assert browser.resolve_cookies("udemy", "brave") == persisted[:1]
+    assert browser.resolve_cookies("udemy") == persisted
+
+
+def test_resolve_cookies_usa_persistida_si_navegador_no_es_utilizable(monkeypatch) -> None:
+    persisted = [{"name": "access_token", "value": "persisted", "domain": ".udemy.com"}]
+    from_browser = [{"name": "access_token", "value": "", "domain": ".udemy.com"}]
+    monkeypatch.setattr(browser, "load_cookies", lambda platform: persisted)
+    monkeypatch.setattr(browser, "load_browser_cookies", lambda browser_name: from_browser)
+
+    assert browser.resolve_cookies("udemy", "brave") == persisted
 
 
 def test_resolve_cookies_hace_fallback_explicito_al_navegador(monkeypatch) -> None:

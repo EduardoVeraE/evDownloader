@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from playwright.async_api import BrowserContext
 
@@ -54,6 +55,19 @@ class Extractor(ABC):
         (p. ej. Udemy con ``cookies_from_browser``) la sobrescriben.
         """
 
+    async def verify_session(self, cookies: Sequence[Mapping[str, Any]]) -> bool | None:
+        """Confirma si ``cookies`` corresponden a una sesión autenticada.
+
+        Devuelve ``True``/``False`` cuando la plataforma puede comprobarlo con
+        una petición ligera, o ``None`` cuando no hay forma de verificar y se
+        debe confiar en la mera presencia de la cookie de sesión.
+
+        La implementación por defecto no verifica (``None``). Los extractores que
+        emiten cookies de invitado antes del login (p. ej. Udemy) la sobrescriben
+        para evitar persistir una sesión anónima.
+        """
+        return None
+
     @staticmethod
     @abstractmethod
     def supports(url: str) -> bool:
@@ -64,9 +78,7 @@ class Extractor(ABC):
         """Extrae la estructura del curso (capítulos y unidades)."""
 
     @abstractmethod
-    async def resolve_video(
-        self, ctx: BrowserContext | None, unit: Unit
-    ) -> VideoSource | None:
+    async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         """Resuelve la fuente de video de una unidad."""
 
     async def resolve_extras(
