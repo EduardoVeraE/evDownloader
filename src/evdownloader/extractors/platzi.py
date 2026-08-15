@@ -100,8 +100,9 @@ _VTT_HOSTS = ("platzi.com", *MEDIASTREAM_HOSTS)
 _MEDIA_DETECTION_TIMEOUT_MS = 20_000
 # Preserva el presupuesto anterior de 1.5 s + 5 s para el primer VTT tras la media.
 _FIRST_VTT_AFTER_MEDIA_TIMEOUT_MS = 6_500
-# En vivo las pistas llegaron en ráfagas de ~3 ms; este margen recoge las tardías.
-_VTT_TRAILING_COLLECTION_MS = 1_500
+# En vivo las pistas llegaron en ráfagas de ~3 ms; 250 ms conserva margen amplio
+# sin sumar 1.5 s a cada clase con subtítulos.
+_VTT_TRAILING_COLLECTION_MS = 250
 
 
 def _is_allowed_vtt_url(url: str) -> bool:
@@ -163,9 +164,7 @@ class PlatziExtractor(Extractor):
                     Unit(
                         title=(u.get("title") or f"Clase {unit_index}").strip(),
                         url=href,
-                        type=self._classify_unit(
-                            href, u.get("thumb", ""), u.get("duration", "")
-                        ),
+                        type=self._classify_unit(href, u.get("thumb", ""), u.get("duration", "")),
                         index=unit_index,
                     )
                 )
@@ -195,9 +194,7 @@ class PlatziExtractor(Extractor):
         return UnitType.LECTURE
 
     # -- Resolución de la fuente de video -----------------------------------
-    async def resolve_video(
-        self, ctx: BrowserContext | None, unit: Unit
-    ) -> VideoSource | None:
+    async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
         assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
