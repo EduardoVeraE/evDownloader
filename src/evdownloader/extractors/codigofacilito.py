@@ -35,6 +35,7 @@ from ..config import (
     Settings,
 )
 from ..models import Chapter, Course, Unit, UnitType, VideoSource
+from ..url_policy import URLPolicy
 from .base import Extractor
 
 # Título del curso: el primer <h1> de la página del curso.
@@ -61,6 +62,7 @@ _TOKEN_RE = re.compile(_MODULE_RE.pattern + "|" + _CLASS_RE.pattern, re.S)
 
 class CodigofacilitoExtractor(Extractor):
     name = "codigofacilito"
+    url_policy = URLPolicy(name, ("codigofacilito.com",))
     # No usa navegador: el temario es SSR (rnet) y el video lo resuelve yt-dlp.
     needs_browser = False
     login_url = CODIGOFACILITO_LOGIN_URL
@@ -79,10 +81,6 @@ class CodigofacilitoExtractor(Extractor):
 
     def configure(self, settings: Settings) -> None:
         self._cookies_from_browser = settings.cookies_from_browser
-
-    @staticmethod
-    def supports(url: str) -> bool:
-        return "codigofacilito.com" in url
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
@@ -166,9 +164,7 @@ class CodigofacilitoExtractor(Extractor):
         return html_lib.unescape(text).strip()
 
     # -- Resolución de la fuente de video -----------------------------------
-    async def resolve_video(
-        self, ctx: BrowserContext | None, unit: Unit
-    ) -> VideoSource | None:
+    async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
         # No se resuelve aquí: el downloader (yt-dlp) toma la URL de la clase,
@@ -194,8 +190,6 @@ class CodigofacilitoExtractor(Extractor):
 
                 jar = extract_cookies_from_browser(self._cookies_from_browser)
                 self._cookie_header = "; ".join(
-                    f"{c.name}={c.value}"
-                    for c in jar
-                    if "codigofacilito.com" in (c.domain or "")
+                    f"{c.name}={c.value}" for c in jar if "codigofacilito.com" in (c.domain or "")
                 )
         return self._cookie_header

@@ -7,6 +7,7 @@ plataforma para poder añadir nuevas sin reescribirlo.
 
 from __future__ import annotations
 
+from ..url_policy import parse_url_authority
 from .base import Extractor
 from .codigofacilito import CodigofacilitoExtractor
 from .platzi import PlatziExtractor
@@ -22,10 +23,11 @@ _BY_NAME: dict[str, type[Extractor]] = {cls.name: cls for cls in _EXTRACTORS}
 
 def get_extractor(url: str) -> Extractor:
     """Devuelve la instancia de extractor que soporta la URL dada."""
+    authority = parse_url_authority(url)
     for cls in _EXTRACTORS:
-        if cls.supports(url):
+        if cls.url_policy.allows_authority(authority):
             return cls()
-    raise ValueError(f"No hay extractor que soporte la URL: {url}")
+    raise ValueError("No hay extractor que soporte esa URL segura.")
 
 
 def get_extractor_by_name(name: str) -> Extractor:

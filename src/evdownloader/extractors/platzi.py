@@ -34,6 +34,7 @@ from ..models import (
     UnitType,
     VideoSource,
 )
+from ..url_policy import URLPolicy
 from .base import Extractor
 
 # Extrae el temario directamente del DOM renderizado. Cada capítulo es un
@@ -118,15 +119,12 @@ def _is_media_request(url: str) -> bool:
 
 class PlatziExtractor(Extractor):
     name = "platzi"
+    url_policy = URLPolicy(name, ("platzi.com",))
     resource_host_suffixes = _PLATZI_FILE_HOSTS
     login_url = LOGIN_URL
     home_url = PLATZI_BASE_URL
     # El avatar del menú de usuario solo aparece tras autenticarse.
     auth_ready_selector = "[class*='Menu'] img, [class*='Avatar'], a[href*='/p/']"
-
-    @staticmethod
-    def supports(url: str) -> bool:
-        return "platzi.com" in url
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:

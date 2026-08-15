@@ -53,6 +53,7 @@ from ..models import (
     UnitType,
     VideoSource,
 )
+from ..url_policy import URLPolicy
 from .base import Extractor
 
 _LECTURE_ID_RE = re.compile(r"/lecture/(\d+)")
@@ -69,6 +70,7 @@ _COURSE_ID_PAGE_RES = (
 )
 _DRM_REFRESH_ATTEMPTS = 3
 _DRM_REFRESH_BACKOFF_SECONDS = (1.0, 2.0)
+_UDEMY_PROVIDER_HOSTS = ("udemy.com",)
 
 
 class UdemyExtractor(Extractor):
@@ -76,6 +78,7 @@ class UdemyExtractor(Extractor):
     # intentionally fail closed until reviewed instead of allowing generic CDNs.
     resource_host_suffixes = ("udemycdn.com",)
     name = "udemy"
+    url_policy = URLPolicy(name, _UDEMY_PROVIDER_HOSTS)
     structure_cache_revision = "articles-v1"
     # No usa navegador: delega en yt-dlp (evita el Cloudflare Turnstile).
     needs_browser = False
@@ -102,10 +105,6 @@ class UdemyExtractor(Extractor):
         self._cookies = []
         self._cookies_loaded = False
         self._cookie_header = None
-
-    @staticmethod
-    def supports(url: str) -> bool:
-        return "udemy.com" in url
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:

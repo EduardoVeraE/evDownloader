@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import BrowserContext
 
 from ..models import Course, Unit, UnitExtras, VideoSource
+from ..url_policy import URLPolicy
 
 if TYPE_CHECKING:
     from ..config import Settings
@@ -47,6 +48,10 @@ class Extractor(ABC):
     #: resources fail closed rather than trusting extractor-provided URLs.
     resource_host_suffixes: tuple[str, ...] = ()
 
+    #: Canonical course/API authority policy. Subclasses must replace the deny-all
+    #: default; registry selection and ``supports`` both use this same object.
+    url_policy = URLPolicy("base", ())
+
     def configure(self, settings: Settings) -> None:  # noqa: B027
         """Recibe los ajustes de la ejecución antes de listar/descargar.
 
@@ -68,10 +73,10 @@ class Extractor(ABC):
         """
         return None
 
-    @staticmethod
-    @abstractmethod
-    def supports(url: str) -> bool:
+    @classmethod
+    def supports(cls, url: str) -> bool:
         """Indica si este extractor puede manejar la URL dada."""
+        return cls.url_policy.allows(url)
 
     @abstractmethod
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
