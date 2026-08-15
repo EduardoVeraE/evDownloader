@@ -8,26 +8,109 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
 
+env:
+  UV_VERSION: "0.11.2"
+
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    environment: pypi
+  gate:
+    runs-on: ubuntu-24.04
     permissions:
-      id-token: write # necesario para el trusted publishing (OIDC)
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.14"
+          enable-cache: false
 
-      - name: Build sdist + wheel
-        run: uv build
+      - name: Verify tag and clean source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/verify_release.py tag "$RELEASE_TAG"
+          python scripts/verify_release.py source
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Sync locked dependencies
+        run: uv sync --locked --no-sources --extra dev
+
+      - name: Quality gates
+        run: |
+          uv run --frozen ruff check src/ tests/ scripts/
+          uv run --frozen mypy src/evdownloader scripts/verify_release.py
+          uv run --frozen python -m pytest -q
+
+      - name: Build twice and verify distributions
+        env:
+          REPEAT_DIST: ${{ runner.temp }}/dist-repeat
+          SDIST_WHEEL: ${{ runner.temp }}/sdist-wheel
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          uv build --no-sources --clear --no-create-gitignore --out-dir dist
+          uv build --no-sources --clear --no-create-gitignore --out-dir "$REPEAT_DIST"
+          uv build --no-sources --wheel --clear --no-create-gitignore \
+            --out-dir "$SDIST_WHEEL" dist/*.tar.gz
+          python scripts/verify_release.py artifacts dist \
+            --compare "$REPEAT_DIST" --sdist-wheel "$SDIST_WHEEL"
+
+      - name: Smoke test wheel and sdist
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          smoke_artifact() {
+            local artifact="$1"
+            local environment="$2"
+            uv venv --python 3.14 "$environment"
+            VIRTUAL_ENV="$environment" uv sync --active --locked --no-sources --no-install-project
+            uv pip install --python "$environment/bin/python" --no-deps "$artifact"
+            "$environment/bin/python" -c \
+              'import evdownloader, sys; assert evdownloader.__version__ == sys.argv[1]' \
+              "${RELEASE_TAG#v}"
+            "$environment/bin/evdownloader" --version
+            "$environment/bin/evd" --version
+          }
+          smoke_artifact dist/*.whl "$RUNNER_TEMP/wheel-smoke"
+          smoke_artifact dist/*.tar.gz "$RUNNER_TEMP/sdist-smoke"
+
+      - name: Recheck clean source
+        run: python scripts/verify_release.py source
+
+      - name: Stage verified distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-dists-${{ github.sha }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing and PEP 740 attestations
+    steps:
+      - name: Download verified distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-dists-${{ github.sha }}
+          path: dist
+
+      - name: Publish to PyPI with provenance
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # official release/v1 head
+        with:
+          packages-dir: dist
+          verify-metadata: true
+          attestations: true
