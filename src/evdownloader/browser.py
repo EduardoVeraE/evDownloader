@@ -22,25 +22,34 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 from .config import DEFAULT_USER_AGENT, ensure_dirs, session_file
 from .models import Cookie
+from .url_policy import hostname_matches, normalize_hostname, parse_url_authority
 
 _SESSION_COOKIE_NAMES: dict[str, frozenset[str]] = {
     "udemy": frozenset({"access_token"}),
     "codigofacilito": frozenset({"_session_id", "_codigofacilito_session"}),
 }
-_UDEMY_COOKIE_DOMAINS = frozenset({"udemy.com", ".udemy.com", "www.udemy.com"})
+_PLATFORM_COOKIE_SUFFIXES = {
+    "udemy": ("udemy.com",),
+    "platzi": ("platzi.com",),
+    "codigofacilito": ("codigofacilito.com",),
+}
 
 
 def is_udemy_cookie(cookie: Mapping[str, Any]) -> bool:
     """Indica si una cookie pertenece a los dominios permitidos de Udemy."""
     domain = cookie.get("domain")
-    return isinstance(domain, str) and domain.lower() in _UDEMY_COOKIE_DOMAINS
+    return isinstance(domain, str) and hostname_matches(domain.lstrip("."), ("udemy.com",))
 
 
 def filter_cookies(platform: str, cookies: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Devuelve solo cookies permitidas para la plataforma."""
-    if platform != "udemy":
-        return [dict(cookie) for cookie in cookies]
-    return [dict(cookie) for cookie in cookies if is_udemy_cookie(cookie)]
+    suffixes = _PLATFORM_COOKIE_SUFFIXES.get(platform, ())
+    return [
+        dict(cookie)
+        for cookie in cookies
+        if isinstance((domain := cookie.get("domain")), str)
+        and hostname_matches(domain.lstrip("."), suffixes)
+    ]
 
 
 def load_cookies(platform: str) -> list[dict[str, Any]]:
@@ -191,56 +200,72 @@ def cookies_as_records(cookies: Sequence[Mapping[str, Any]]) -> list[Cookie]:
     return records
 
 
+def filter_cookie_records(
+    cookies: Sequence[Cookie],
+    trusted_host_suffixes: tuple[str, ...],
+    *,
+    now: float | None = None,
+) -> list[Cookie]:
+    """Keep only valid, live cookies inside an explicit trusted boundary."""
+    current_time = time.time() if now is None else now
+    return [
+        cookie
+        for cookie in cookies
+        if _valid_cookie_record(cookie, current_time)
+        and hostname_matches(cookie.domain.lstrip("."), trusted_host_suffixes)
+    ]
+
+
+def _valid_cookie_record(cookie: Cookie, current_time: float) -> bool:
+    name = getattr(cookie, "name", None)
+    value = getattr(cookie, "value", None)
+    domain = getattr(cookie, "domain", None)
+    path = getattr(cookie, "path", None)
+    secure = getattr(cookie, "secure", None)
+    expires = getattr(cookie, "expires", None)
+    return bool(
+        isinstance(name, str)
+        and name
+        and all(char.isascii() and (char.isalnum() or char in "!#$%&'*+-.^_`|~") for char in name)
+        and isinstance(value, str)
+        and all("\x21" <= char <= "\x7e" and char not in '",;\\' for char in value)
+        and isinstance(domain, str)
+        and domain
+        and not domain.endswith(".")
+        and normalize_hostname(domain.lstrip(".")) is not None
+        and isinstance(path, str)
+        and path.startswith("/")
+        and ";" not in path
+        and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in path)
+        and isinstance(secure, bool)
+        and isinstance(expires, (int, float))
+        and math.isfinite(expires)
+        and (expires <= 0 or expires > current_time)
+    )
+
+
 def cookie_header_for_url(
-    cookies: Sequence[Cookie], url: str, *, now: float | None = None
+    cookies: Sequence[Cookie],
+    url: str,
+    *,
+    trusted_host_suffixes: tuple[str, ...] | None = None,
+    trusted_ports: frozenset[int] = frozenset({443}),
+    now: float | None = None,
 ) -> str | None:
     """Devuelve las cookies cuyo dominio, ruta y vigencia permiten enviarlas a ``url``."""
-    try:
-        parsed = urlsplit(url)
-        host = parsed.hostname
-        _ = parsed.port  # Valida puertos no numericos o fuera de rango.
-    except TypeError, ValueError:
-        return None
+    authority = parse_url_authority(url)
     if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or host is None
-        or any(char.isspace() or char == "\\" for char in url)
+        authority is None
+        or authority.port not in trusted_ports
+        or (
+            trusted_host_suffixes is not None
+            and not hostname_matches(authority.hostname, trusted_host_suffixes)
+        )
     ):
         return None
+    host = authority.hostname
 
-    host = host.lower()
-
-    def valid_host(value: str) -> bool:
-        try:
-            ipaddress.ip_address(value)
-            return True
-        except ValueError:
-            labels = value.split(".")
-            return len(value) <= 253 and all(
-                label
-                and len(label) <= 63
-                and label[0] != "-"
-                and label[-1] != "-"
-                and all(char.isascii() and (char.isalnum() or char == "-") for char in label)
-                for label in labels
-            )
-
-    def valid_header_cookie(cookie: Cookie) -> bool:
-        name = getattr(cookie, "name", None)
-        value = getattr(cookie, "value", None)
-        if not isinstance(name, str) or not name or not isinstance(value, str):
-            return False
-        if not all(
-            char.isascii() and (char.isalnum() or char in "!#$%&'*+-.^_`|~") for char in name
-        ):
-            return False
-        return all("\x21" <= char <= "\x7e" and char not in '",;\\' for char in value)
-
-    if not valid_host(host):
-        return None
-
-    request_path = parsed.path or "/"
+    request_path = urlsplit(url).path or "/"
     current_time = time.time() if now is None else now
     matches: list[Cookie] = []
     for cookie in cookies:
@@ -249,7 +274,7 @@ def cookie_header_for_url(
         secure = getattr(cookie, "secure", None)
         expires = getattr(cookie, "expires", None)
         if (
-            not valid_header_cookie(cookie)
+            not _valid_cookie_record(cookie, current_time)
             or not isinstance(domain_scope, str)
             or not isinstance(path, str)
             or not isinstance(secure, bool)
@@ -258,9 +283,11 @@ def cookie_header_for_url(
             continue
 
         domain_scope = domain_scope.lower()
+        if domain_scope.endswith("."):
+            continue
         include_subdomains = domain_scope.startswith(".")
-        domain = domain_scope[1:] if include_subdomains else domain_scope
-        if not valid_host(domain):
+        domain = normalize_hostname(domain_scope[1:] if include_subdomains else domain_scope)
+        if domain is None:
             continue
 
         try:
@@ -292,11 +319,7 @@ def cookie_header_for_url(
             )
         ):
             continue
-        if secure and parsed.scheme != "https":
-            continue
-        if not math.isfinite(expires):
-            continue
-        if expires > 0 and expires <= current_time:
+        if secure and authority.scheme != "https":
             continue
         matches.append(cookie)
 

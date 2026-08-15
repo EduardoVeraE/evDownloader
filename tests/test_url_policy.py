@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from evdownloader import browser
 from evdownloader.extractors import get_extractor
 from evdownloader.extractors.codigofacilito import CodigofacilitoExtractor
-from evdownloader.extractors.platzi import PlatziExtractor
+from evdownloader.extractors.platzi import PlatziExtractor, _is_media_request
 from evdownloader.extractors.udemy import UdemyExtractor
+from evdownloader.models import Cookie
+from evdownloader.resource_download import _trusted_url
 from evdownloader.url_policy import URLPolicy, parse_url_authority
 
 _PROVIDERS = [
@@ -95,3 +98,86 @@ def test_authority_parser_preserves_valid_external_port() -> None:
 def test_authority_policy_matches_ip_addresses_exactly() -> None:
     assert URLPolicy("synthetic", ("127.0.0.1",)).allows("https://127.0.0.1/path")
     assert not URLPolicy("synthetic", ("0.0.1",)).allows("https://127.0.0.1/path")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://udemycdn.com/file", True),
+        ("https://cdn.udemycdn.com/file", True),
+        ("https://udemycdn.com.evil.test/file", False),
+        ("https://eviludemycdn.com/file", False),
+        ("https://udemycdn.com:444/file", False),
+        ("https://udemycdn.com:0/file", False),
+        ("https://udemycdn.com./file", False),
+        ("https://user@udemycdn.com/file", False),
+    ],
+)
+def test_resource_cdn_policy_uses_label_boundaries(url: str, expected: bool) -> None:
+    assert _trusted_url(url, ("udemycdn.com",)) is expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://mdstrm.com/embed/id", True),
+        ("https://cdn.mdstrm.com/video/master.m3u8", True),
+        ("https://mdstrm.com.evil.test/video/master.m3u8", False),
+        ("https://evilmdstrm.com/video/master.m3u8", False),
+        ("https://mdstrm.com:444/video/master.m3u8", False),
+        ("https://mdstrm.com:0/video/master.m3u8", False),
+        ("https://mdstrm.com./video/master.m3u8", False),
+    ],
+)
+def test_platzi_media_policy_uses_label_boundaries(url: str, expected: bool) -> None:
+    assert _is_media_request(url) is expected
+
+
+def test_cookie_forwarding_intersects_rfc_scope_with_trusted_boundary() -> None:
+    cookies = [
+        Cookie(name="provider", value="one", domain=".provider.test", path="/private"),
+        Cookie(name="other", value="two", domain=".other.test", path="/"),
+    ]
+    assert (
+        browser.cookie_header_for_url(
+            cookies,
+            "https://api.provider.test/private/file",
+            trusted_host_suffixes=("provider.test",),
+            now=100,
+        )
+        == "provider=one"
+    )
+    assert (
+        browser.cookie_header_for_url(
+            cookies,
+            "https://other.test/private/file",
+            trusted_host_suffixes=("provider.test",),
+            now=100,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://provider.test:0/private", "https://provider.test./private"],
+)
+def test_cookie_forwarding_rejects_zero_port_and_trailing_dot(url: str) -> None:
+    cookie = Cookie(name="session", value="synthetic", domain=".provider.test")
+    assert (
+        browser.cookie_header_for_url(
+            [cookie], url, trusted_host_suffixes=("provider.test",), now=100
+        )
+        is None
+    )
+
+
+def test_cookiefile_filter_rejects_expired_malformed_and_cross_boundary_records() -> None:
+    valid = Cookie(name="session", value="valid", domain=".provider.test")
+    records = [
+        valid,
+        Cookie(name="expired", value="old", domain=".provider.test", expires=99),
+        Cookie(name="bad", value="line\nbreak", domain=".provider.test"),
+        Cookie(name="other", value="third-party", domain=".other.test"),
+    ]
+    assert browser.filter_cookie_records(records, ("provider.test",), now=100) == [valid]

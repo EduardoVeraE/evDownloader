@@ -88,9 +88,9 @@ class VideoSource(BaseModel):
 
     ``url`` puede ser el embed de Mediastream (``https://mdstrm.com/embed/{id}``)
     o directamente el master playlist ``.m3u8``. ``http_headers`` lleva los
-    encabezados coherentes (User-Agent, Referer); ``cookies`` el estado de sesión
-    como ``name -> value`` (para construir el header ``Cookie`` en rnet/FFmpeg) y
-    ``cookie_jar`` las cookies completas (para generar un cookiefile en yt-dlp).
+    encabezados coherentes (User-Agent, Referer). ``cookies`` conserva metadata
+    heredada sin ámbito y no se reenvía; ``cookie_jar`` contiene las cookies
+    completas usadas para aplicar dominio, ruta, HTTPS y expiración.
     """
 
     url: str
@@ -98,6 +98,9 @@ class VideoSource(BaseModel):
     http_headers: dict[str, str] = Field(default_factory=dict)
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_jar: list[Cookie] = Field(default_factory=list)
+    # Authorities to which provider credentials may be sent. Downloader and
+    # subtitle boundaries fail closed when this is empty.
+    trusted_host_suffixes: tuple[str, ...] = ()
     subtitles: list[Subtitle] = Field(default_factory=list)
     # Si el downloader (yt-dlp) debe extraer los subtítulos junto con el video.
     # Lo usan los extractores que delegan la resolución en yt-dlp (Udemy); los

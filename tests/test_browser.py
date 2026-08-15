@@ -36,7 +36,7 @@ def test_cookie_header_matches_ip_addresses_exactly() -> None:
         Cookie(name="suffix", value="no", domain=".0.0.1"),
     ]
 
-    assert browser.cookie_header_for_url(cookies, "http://127.0.0.1", now=100) == "exact=yes"
+    assert browser.cookie_header_for_url(cookies, "https://127.0.0.1", now=100) == "exact=yes"
 
 
 def test_cookie_header_applies_path_boundary_order_and_preserves_duplicates() -> None:

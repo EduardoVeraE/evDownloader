@@ -8,13 +8,14 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 import rnet
 
 from . import browser
 from .config import RNET_IMPERSONATE
 from .models import Cookie
+from .url_policy import URLPolicy
 
 MAX_RESOURCE_BYTES = 100 * 1024 * 1024
 MAX_REDIRECTS = 5
@@ -38,16 +39,7 @@ def exception_name(exc: BaseException) -> str:
 
 
 def _trusted_url(url: str, trusted_host_suffixes: tuple[str, ...]) -> bool:
-    try:
-        parsed = urlsplit(url)
-        host = parsed.hostname
-        _ = parsed.port
-    except (TypeError, ValueError):
-        return False
-    if parsed.scheme != "https" or host is None or parsed.username or parsed.password:
-        return False
-    host = host.lower().rstrip(".")
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in trusted_host_suffixes)
+    return URLPolicy("resource", trusted_host_suffixes).allows(url)
 
 
 def _status_code(response: object) -> int:
@@ -84,13 +76,15 @@ async def download_resource(
             visited.add(current_url)
 
             headers: dict[str, str] = {}
-            cookie_header = browser.cookie_header_for_url(cookie_jar, current_url)
+            cookie_header = browser.cookie_header_for_url(
+                cookie_jar,
+                current_url,
+                trusted_host_suffixes=trusted_host_suffixes,
+            )
             if cookie_header:
                 headers["Cookie"] = cookie_header
             try:
-                response = await client.get(
-                    current_url, headers=headers, allow_redirects=False
-                )
+                response = await client.get(current_url, headers=headers, allow_redirects=False)
             except Exception as exc:  # noqa: BLE001 - exception values may contain signed URLs
                 return ResourceDownloadResult(
                     False, "network_error", error_name=exception_name(exc)
@@ -119,7 +113,7 @@ async def download_resource(
                     try:
                         if int(declared_length) > max_bytes:
                             return ResourceDownloadResult(False, "declared_too_large", status)
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         pass
 
                 size = 0

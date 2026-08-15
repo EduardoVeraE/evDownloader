@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Request
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -91,6 +90,8 @@ _EXTRAS_JS = r"""() => {
 
 # Dominios desde los que Platzi sirve archivos descargables propios.
 _PLATZI_FILE_HOSTS = ("static.platzi.com", "files.platzi.com")
+_PLATZI_MEDIA_HOSTS = ("platzi.com", *MEDIASTREAM_HOSTS)
+_PLATZI_MEDIA_POLICY = URLPolicy("platzi", _PLATZI_MEDIA_HOSTS)
 
 _MDSTRM_EMBED_RE = re.compile(r"https?://mdstrm\.com/embed/(\w+)")
 # .m3u8 que NO sea un playlist de subtítulos (.vtt.m3u8).
@@ -107,14 +108,13 @@ _VTT_TRAILING_COLLECTION_MS = 250
 
 
 def _is_allowed_vtt_url(url: str) -> bool:
-    hostname = (urlparse(url).hostname or "").lower()
-    return bool(_VTT_RE.search(url)) and any(
-        hostname == host or hostname.endswith(f".{host}") for host in _VTT_HOSTS
-    )
+    return bool(_VTT_RE.search(url)) and URLPolicy("platzi", _VTT_HOSTS).allows(url)
 
 
 def _is_media_request(url: str) -> bool:
-    return bool(_MDSTRM_EMBED_RE.search(url) or _M3U8_RE.search(url))
+    return _PLATZI_MEDIA_POLICY.allows(url) and bool(
+        _MDSTRM_EMBED_RE.search(url) or _M3U8_RE.search(url)
+    )
 
 
 class PlatziExtractor(Extractor):
@@ -330,11 +330,7 @@ class PlatziExtractor(Extractor):
     @staticmethod
     def _resource_kind(url: str) -> ResourceKind:
         """Distingue un archivo alojado por Platzi de un enlace externo."""
-        try:
-            host = urlparse(url).hostname
-        except ValueError:
-            host = None
-        if host and host.lower().rstrip(".") in _PLATZI_FILE_HOSTS:
+        if URLPolicy("platzi", _PLATZI_FILE_HOSTS).allows(url):
             return ResourceKind.FILE
         return ResourceKind.LINK
 
