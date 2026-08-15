@@ -18,12 +18,15 @@ from evdownloader.models import (
     Subtitle,
     Unit,
     UnitExtras,
+    UnitType,
     VideoSource,
 )
 from evdownloader.service import (
     _download_files,
     _download_video,
     _load_structure,
+    _process_unit,
+    _run_download,
     _save_extras,
     download_course,
 )
@@ -98,6 +101,135 @@ async def test_load_structure_rejects_fresh_empty_course_without_caching() -> No
         await _load_structure(extractor, None, url, use_cache=False)
 
     cache_set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_load_structure_ignores_legacy_udemy_video_only_cache() -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    url = "https://www.udemy.com/course/x/"
+    stale = Course(
+        title="Stale",
+        url=url,
+        chapters=[Chapter(title="One", units=[_unit()])],
+    )
+    fresh = Course(
+        title="Fresh",
+        url=url,
+        chapters=[
+            Chapter(
+                title="One",
+                units=[
+                    Unit(title="Video", url="https://example.test/video", index=1),
+                    Unit(
+                        title="Reading",
+                        url="https://example.test/reading",
+                        type=UnitType.LECTURE,
+                        index=2,
+                    ),
+                ],
+            )
+        ],
+    )
+    extractor = UdemyExtractor()
+    extractor.list_course = AsyncMock(return_value=fresh)  # type: ignore[method-assign]
+
+    def cached(key: str) -> dict[str, object] | None:
+        return stale.model_dump() if key == url else None
+
+    with (
+        patch("evdownloader.service.cache.get", side_effect=cached) as cache_get,
+        patch("evdownloader.service.cache.set") as cache_set,
+    ):
+        result = await _load_structure(extractor, None, url, use_cache=True)
+
+    assert result == fresh
+    extractor.list_course.assert_awaited_once_with(None, url)
+    revisioned_url = cache_get.call_args.args[0]
+    assert revisioned_url.endswith("#evd-structure=articles-v1")
+    cache_set.assert_called_once_with(revisioned_url, fresh.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_limit_counts_videos_and_stops_after_nth_video(tmp_path: Path) -> None:
+    leading_article = Unit(
+        title="Leading reading",
+        url="https://example.test/leading",
+        type=UnitType.LECTURE,
+        index=1,
+    )
+    selected_video = Unit(
+        title="Selected video",
+        url="https://example.test/video",
+        type=UnitType.VIDEO,
+        index=2,
+    )
+    trailing_article = Unit(
+        title="Trailing reading",
+        url="https://example.test/trailing",
+        type=UnitType.LECTURE,
+        index=3,
+    )
+    course = Course(
+        title="Course",
+        url="https://example.test/course",
+        chapters=[
+            Chapter(
+                title="Chapter",
+                index=1,
+                units=[leading_article, selected_video, trailing_article],
+            )
+        ],
+    )
+    extractor = MagicMock(name="extractor")
+    extractor.name = "test"
+    downloader = MagicMock(name="downloader")
+
+    with (
+        patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
+        patch("evdownloader.service._process_unit", new=AsyncMock()) as process_unit,
+    ):
+        await _run_download(
+            extractor,
+            downloader,
+            None,
+            course.url,
+            Settings(download_dir=tmp_path, limit=1),
+            use_cache=False,
+        )
+
+    assert [entry.args[3] for entry in process_unit.await_args_list] == [
+        leading_article,
+        selected_video,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_article_summary_filename_uses_curriculum_ordinal(tmp_path: Path) -> None:
+    unit = Unit(
+        title="Reading",
+        url="https://example.test/reading",
+        type=UnitType.LECTURE,
+        index=2,
+    )
+    extractor = MagicMock()
+    extractor.resolve_extras = AsyncMock(
+        return_value=UnitExtras(summary_html="<p>Test reading</p>")
+    )
+
+    await _process_unit(
+        extractor,
+        MagicMock(),
+        None,
+        unit,
+        tmp_path,
+        Settings(download_dir=tmp_path),
+    )
+
+    summary = tmp_path / "02-Reading.resumen.html"
+    assert summary.is_file()
+    assert "<p>Test reading</p>" in summary.read_text(encoding="utf-8")
+    assert not (tmp_path / "01-Reading.resumen.html").exists()
 
 
 @pytest.fixture

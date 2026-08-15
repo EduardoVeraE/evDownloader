@@ -108,20 +108,25 @@ async def _run_download(
     for chapter in course.chapters:
         chapter_dir = safe_mkdir(course_dir / numbered(chapter.index, chapter.title))
         for unit in chapter.units:
-            if unit.type == UnitType.VIDEO:
+            if (
+                unit.type is UnitType.VIDEO
+                and settings.limit is not None
+                and downloaded >= settings.limit
+            ):
+                console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
+                return
+            await _process_unit(extractor, downloader, ctx, unit, chapter_dir, settings)
+            if unit.type is UnitType.VIDEO:
+                downloaded += 1
                 if settings.limit is not None and downloaded >= settings.limit:
                     console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
-                    break
-                downloaded += 1
-            await _process_unit(extractor, downloader, ctx, unit, chapter_dir, settings)
-        else:
-            continue
-        break
+                    return
 
 
 async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Course:
+    cache_url = _structure_cache_key(extractor, url)
     if use_cache:
-        cached = cache.get(url)
+        cached = cache.get(cache_url)
         if cached:
             cached_course = Course.model_validate(cached)
             if any(chapter.units for chapter in cached_course.chapters):
@@ -133,8 +138,15 @@ async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Cours
             "No se encontraron unidades descargables. Verifica el acceso al curso "
             "e inténtalo de nuevo."
         )
-    cache.set(url, course.model_dump())
+    cache.set(cache_url, course.model_dump())
     return course
+
+
+def _structure_cache_key(extractor, url: str) -> str:
+    revision = getattr(type(extractor), "structure_cache_revision", None)
+    if not isinstance(revision, str) or not revision:
+        return url
+    return f"{url}#evd-structure={revision}"
 
 
 async def _process_unit(

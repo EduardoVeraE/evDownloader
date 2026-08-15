@@ -3,7 +3,7 @@
 Cubren, sin red ni yt-dlp real:
 * ``supports`` / registro / ``needs_browser``.
 * ``configure`` propaga el navegador de fallback.
-* ``_build_course`` agrupa el currículum de la API 2.0 en capítulos y emite las
+* ``_build_course`` conserva videos y artículos con sus ordinales reales y emite
   URLs "smuggleadas" con el course_id.
 * ``list_course`` exige una sesión persistida o ``--cookies-from-browser``.
 * ``resolve_video`` devuelve la URL de la lección para que la resuelva yt-dlp.
@@ -114,15 +114,35 @@ def test_build_course_titulo_por_defecto() -> None:
     assert course.title == "Curso"
 
 
-def test_build_course_omite_lecciones_no_video() -> None:
+def test_build_course_conserva_video_articulo_video_con_ordinal_real() -> None:
     items = [
         _chapter("S", 1),
-        _lecture("1", "Video", "Video"),
-        _lecture("2", "Artículo", "Article"),  # se omite
+        _lecture("1", "Video inicial", "Video"),
+        _lecture("2", "Artículo", "Article"),
+        _lecture("3", "Video final", "Video"),
     ]
     course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", items)
-    assert sum(len(c.units) for c in course.chapters) == 1
-    assert course.chapters[0].units[0].title == "Video"
+    units = course.chapters[0].units
+
+    assert [unit.type for unit in units] == [
+        UnitType.VIDEO,
+        UnitType.LECTURE,
+        UnitType.VIDEO,
+    ]
+    assert [unit.index for unit in units] == [1, 2, 3]
+
+
+def test_build_course_clasifica_y_omite_asset_no_soportado_sin_reindexar() -> None:
+    items = [
+        _chapter("S", 1),
+        _lecture("1", "Video inicial", "Video"),
+        _lecture("2", "Ejercicio", "Practice"),
+        _lecture("3", "Video final", "Video"),
+    ]
+    course = UdemyExtractor()._build_course("https://www.udemy.com/course/x/", "42", items)
+
+    assert [unit.title for unit in course.chapters[0].units] == ["Video inicial", "Video final"]
+    assert [unit.index for unit in course.chapters[0].units] == [1, 3]
 
 
 def test_build_course_sin_items() -> None:
@@ -154,6 +174,8 @@ async def test_fetch_curriculum_rejects_invalid_page_payload(body: str) -> None:
     with pytest.raises(ValueError, match="currículum"):
         await extractor._fetch_curriculum("42")
 
+    response.close.assert_awaited_once_with()
+
 
 @pytest.mark.asyncio
 async def test_fetch_curriculum_rejects_request_failure() -> None:
@@ -181,6 +203,8 @@ async def test_fetch_curriculum_discards_results_when_later_page_fails() -> None
 
     with pytest.raises(ValueError, match="Inténtalo de nuevo"):
         await extractor._fetch_curriculum("42")
+
+    first.close.assert_awaited_once_with()
 
 
 # -- list_course exige una fuente de credenciales -----------------------------
@@ -340,6 +364,105 @@ def test_assets_to_resources_enlace_externo() -> None:
 def test_assets_to_resources_omite_sin_url() -> None:
     assets = [{"asset_type": "File", "title": "x", "external_url": "", "download_urls": {}}]
     assert UdemyExtractor._assets_to_resources(assets) == []
+
+
+def _article_unit() -> Unit:
+    course = UdemyExtractor()._build_course(
+        "https://www.udemy.com/course/x/",
+        "42",
+        [_chapter("S", 1), _lecture("2", "Lectura", "Article")],
+    )
+    return course.chapters[0].units[0]
+
+
+@pytest.mark.asyncio
+async def test_resolve_extras_articulo_sin_suplementos_expone_body_y_cierra() -> None:
+    response = AsyncMock()
+    response.text.return_value = json.dumps(
+        {
+            "asset": {"asset_type": "Article", "body": "<p>Test reading</p>"},
+            "supplementary_assets": [],
+        }
+    )
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    extras = await extractor.resolve_extras(None, _article_unit())
+
+    assert extras.summary_html == "<p>Test reading</p>"
+    assert extras.resources == []
+    response.close.assert_awaited_once_with()
+    requested_url = client.get.await_args.args[0]
+    assert "fields%5Blecture%5D=asset%2Csupplementary_assets" in requested_url
+    assert "body" in requested_url
+
+
+@pytest.mark.asyncio
+async def test_resolve_extras_articulo_con_archivo_y_enlace_preserva_todo() -> None:
+    response = AsyncMock()
+    response.text.return_value = json.dumps(
+        {
+            "asset": {"asset_type": "Article", "body": "<p>Test reading</p>"},
+            "supplementary_assets": [
+                {
+                    "asset_type": "File",
+                    "filename": "notes.pdf",
+                    "download_urls": {
+                        "File": [{"file": "https://att-c.udemycdn.com/test/notes.pdf"}]
+                    },
+                },
+                {
+                    "asset_type": "ExternalLink",
+                    "title": "Reference",
+                    "external_url": "https://example.test/reference",
+                },
+            ],
+        }
+    )
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    extras = await extractor.resolve_extras(None, _article_unit())
+
+    assert extras.summary_html == "<p>Test reading</p>"
+    assert [resource.kind for resource in extras.resources] == [
+        ResourceKind.FILE,
+        ResourceKind.LINK,
+    ]
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_resolve_extras_cierra_respuesta_si_falla_lectura() -> None:
+    response = AsyncMock()
+    response.text.side_effect = RuntimeError("synthetic read failure")
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    extras = await extractor.resolve_extras(None, _article_unit())
+
+    assert extras.summary_html is None
+    assert extras.resources == []
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_fetch_text_cierra_respuesta_si_falla_lectura() -> None:
+    response = AsyncMock()
+    response.text.side_effect = RuntimeError("synthetic read failure")
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    assert await extractor._fetch_text("https://www.udemy.com/course/x/") == ""
+    response.close.assert_awaited_once_with()
 
 
 # -- Sesión por plataforma ----------------------------------------------------
