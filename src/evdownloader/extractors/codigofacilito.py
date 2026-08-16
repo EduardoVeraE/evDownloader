@@ -21,12 +21,15 @@ reutiliza toda la infraestructura de yt-dlp del proyecto (igual que Udemy).
 
 from __future__ import annotations
 
+import contextlib
 import html as html_lib
 import re
+from urllib.parse import urljoin
 
 import rnet
 from playwright.async_api import BrowserContext
 
+from .. import browser
 from ..config import (
     CODIGOFACILITO_BASE_URL,
     CODIGOFACILITO_LOGIN_URL,
@@ -34,9 +37,11 @@ from ..config import (
     RNET_IMPERSONATE,
     Settings,
 )
-from ..models import Chapter, Course, Unit, UnitType, VideoSource
+from ..models import Chapter, Cookie, Course, Unit, UnitType, VideoSource
 from ..url_policy import URLPolicy
 from .base import Extractor
+
+_MAX_REDIRECTS = 5
 
 # Título del curso: el primer <h1> de la página del curso.
 _TITLE_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S)
@@ -76,14 +81,17 @@ class CodigofacilitoExtractor(Extractor):
 
     def __init__(self) -> None:
         self._cookies_from_browser: str | None = None
-        self._cookie_header: str | None = None
+        self._cookie_jar: list[Cookie] | None = None
         self._client: rnet.Client | None = None
 
     def configure(self, settings: Settings) -> None:
         self._cookies_from_browser = settings.cookies_from_browser
+        self._cookie_jar = None
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
+        if not self.url_policy.allows(url):
+            raise ValueError("Codigofacilito rechazó una URL de curso no confiable.")
         if not self._cookies_from_browser:
             raise ValueError(
                 "Codigofacilito requiere --cookies-from-browser <navegador> "
@@ -94,15 +102,37 @@ class CodigofacilitoExtractor(Extractor):
 
     async def _fetch(self, url: str) -> str:
         """Descarga el HTML del curso con las cookies del navegador del usuario."""
-        headers = {
-            "User-Agent": DEFAULT_USER_AGENT,
-            "Referer": CODIGOFACILITO_BASE_URL + "/",
-        }
-        cookie = self._cf_cookie_header()
-        if cookie:
-            headers["Cookie"] = cookie
-        resp = await self._rnet_client().get(url, headers=headers)
-        return await resp.text()
+        current_url = url
+        for hop in range(_MAX_REDIRECTS + 1):
+            if not self.url_policy.allows(current_url):
+                raise ValueError("Codigofacilito rechazó un redirect fuera del proveedor.")
+            headers = {
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Referer": CODIGOFACILITO_BASE_URL + "/",
+            }
+            cookie = browser.cookie_header_for_url(
+                self._cf_cookie_records(),
+                current_url,
+                trusted_host_suffixes=self.url_policy.host_suffixes,
+            )
+            if cookie:
+                headers["Cookie"] = cookie
+            resp = await self._rnet_client().get(
+                current_url, headers=headers, allow_redirects=False
+            )
+            try:
+                status = resp.status_code.as_int()
+                if status in {301, 302, 303, 307, 308}:
+                    location = resp.headers.get("location")
+                    if not isinstance(location, str) or not location or hop == _MAX_REDIRECTS:
+                        raise ValueError("Codigofacilito devolvió un redirect inválido.")
+                    current_url = urljoin(current_url, location)
+                    continue
+                return await resp.text()
+            finally:
+                with contextlib.suppress(Exception):
+                    await resp.close()
+        raise ValueError("Codigofacilito excedió el límite de redirects.")
 
     @classmethod
     def _parse_course(cls, url: str, html: str) -> Course:
@@ -167,10 +197,18 @@ class CodigofacilitoExtractor(Extractor):
     async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Codigofacilito rechazó una URL de clase no confiable.")
         # No se resuelve aquí: el downloader (yt-dlp) toma la URL de la clase,
         # detecta el embed de BunnyCDN y lo descarga con las cookies del
         # navegador (settings.cookies_from_browser).
-        return VideoSource(url=unit.url, is_embed=True, write_subs=True)
+        return VideoSource(
+            url=unit.url,
+            is_embed=True,
+            write_subs=True,
+            cookie_jar=self._cf_cookie_records(),
+            trusted_host_suffixes=self.url_policy.host_suffixes,
+        )
 
     # -- Auxiliares de red ---------------------------------------------------
     def _rnet_client(self) -> rnet.Client:
@@ -180,16 +218,15 @@ class CodigofacilitoExtractor(Extractor):
             )
         return self._client
 
-    def _cf_cookie_header(self) -> str:
-        """Construye (una vez) el header Cookie de codigofacilito.com desde el navegador."""
-        if self._cookie_header is None:
-            if not self._cookies_from_browser:
-                self._cookie_header = ""
-            else:
-                from yt_dlp.cookies import extract_cookies_from_browser
-
-                jar = extract_cookies_from_browser(self._cookies_from_browser)
-                self._cookie_header = "; ".join(
-                    f"{c.name}={c.value}" for c in jar if "codigofacilito.com" in (c.domain or "")
+    def _cf_cookie_records(self) -> list[Cookie]:
+        """Load only Codigofacilito-scoped browser cookies once."""
+        if self._cookie_jar is None:
+            raw = (
+                browser.filter_cookies(
+                    self.name, browser.load_browser_cookies(self._cookies_from_browser)
                 )
-        return self._cookie_header
+                if self._cookies_from_browser
+                else []
+            )
+            self._cookie_jar = browser.cookies_as_records(raw)
+        return self._cookie_jar

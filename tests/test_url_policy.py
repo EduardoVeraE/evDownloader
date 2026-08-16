@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from evdownloader import browser
@@ -181,3 +184,88 @@ def test_cookiefile_filter_rejects_expired_malformed_and_cross_boundary_records(
         Cookie(name="other", value="third-party", domain=".other.test"),
     ]
     assert browser.filter_cookie_records(records, ("provider.test",), now=100) == [valid]
+
+
+class _Response:
+    def __init__(self, status: int, *, location: str | None = None, text: str = "body") -> None:
+        self.status_code = SimpleNamespace(
+            as_int=lambda: status, is_success=lambda: 200 <= status < 300
+        )
+        self.headers = {"location": location} if location else {}
+        self.text = AsyncMock(return_value=text)
+        self.bytes = AsyncMock(return_value=b"license")
+        self.close = AsyncMock()
+
+
+@pytest.mark.asyncio
+async def test_udemy_authenticated_redirect_stops_before_untrusted_host() -> None:
+    response = _Response(302, location="https://evil.test/final?token=synthetic")
+    extractor = UdemyExtractor()
+    extractor._load_cookies = MagicMock(  # type: ignore[method-assign]
+        return_value=[
+            {
+                "name": "session",
+                "value": "synthetic",
+                "domain": ".udemy.com",
+                "path": "/",
+                "secure": True,
+            }
+        ]
+    )
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    extractor._client = client
+
+    assert await extractor._fetch_text("https://www.udemy.com/course/start") == ""
+    assert client.get.await_count == 1
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    ["https://www.udemy.com:0/course/start", "https://www.udemy.com./course/start"],
+)
+async def test_udemy_authenticated_request_rejects_invalid_provider_authority(
+    url: str,
+) -> None:
+    extractor = UdemyExtractor()
+    extractor._load_cookies = MagicMock(  # type: ignore[method-assign]
+        return_value=[{"name": "session", "value": "synthetic", "domain": ".udemy.com"}]
+    )
+    client = MagicMock()
+    client.get = AsyncMock()
+    extractor._client = client
+
+    assert await extractor._fetch_text(url) == ""
+    client.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_codigofacilito_authenticated_redirect_stops_before_untrusted_host() -> None:
+    response = _Response(302, location="https://codigofacilito.com.evil.test/final")
+    extractor = CodigofacilitoExtractor()
+    extractor._cookie_jar = [
+        Cookie(name="session", value="synthetic", domain=".codigofacilito.com")
+    ]
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="fuera del proveedor"):
+        await extractor._fetch("https://codigofacilito.com/course/start")
+    assert client.get.await_count == 1
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_platzi_rejects_untrusted_final_navigation_url() -> None:
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=SimpleNamespace(url="https://platzi.com.evil.test/final"))
+    page.close = AsyncMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    with pytest.raises(ValueError, match="redirect fuera del proveedor"):
+        await PlatziExtractor().list_course(context, "https://platzi.com/courses/test")
+    page.close.assert_awaited_once_with()

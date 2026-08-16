@@ -16,7 +16,7 @@ import asyncio
 import base64
 import json
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,7 +25,7 @@ from evdownloader.config import Settings, session_file
 from evdownloader.drm.license import UDEMY_WIDEVINE_PROXY_URL
 from evdownloader.drm.token_cache import DrmTokenCache, _decode_jwt_exp
 from evdownloader.extractors import get_extractor, get_extractor_by_name
-from evdownloader.extractors.udemy import UdemyExtractor
+from evdownloader.extractors.udemy import _MAX_CURRICULUM_PAGES, UdemyExtractor
 from evdownloader.models import DrmInfo, ResourceKind, Unit, UnitType
 
 
@@ -201,10 +201,58 @@ async def test_fetch_curriculum_discards_results_when_later_page_fails() -> None
     client.get.side_effect = [first, RuntimeError("second page failed")]
     extractor._client = client
 
-    with pytest.raises(ValueError, match="Inténtalo de nuevo"):
+    with pytest.raises(ValueError, match="fuera del proveedor"):
         await extractor._fetch_curriculum("42")
 
+    assert client.get.await_count == 1
     first.close.assert_awaited_once_with()
+
+
+def _curriculum_page(next_url: str | None) -> AsyncMock:
+    response = AsyncMock()
+    response.text.return_value = json.dumps({"results": [], "next": next_url})
+    return response
+
+
+@pytest.mark.asyncio
+async def test_fetch_curriculum_allows_the_full_safe_page_budget() -> None:
+    responses = [
+        _curriculum_page(
+            None
+            if page == _MAX_CURRICULUM_PAGES - 1
+            else f"https://www.udemy.com/api-2.0/page/{page + 1}"
+        )
+        for page in range(_MAX_CURRICULUM_PAGES)
+    ]
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.side_effect = responses
+    extractor._client = client
+
+    assert await extractor._fetch_curriculum("42") == []
+    assert client.get.await_count == _MAX_CURRICULUM_PAGES
+    assert all(response.close.await_count == 1 for response in responses)
+
+
+@pytest.mark.asyncio
+async def test_fetch_curriculum_rejects_page_beyond_safe_budget() -> None:
+    secret = "synthetic-secret"
+    responses = [
+        _curriculum_page(f"https://www.udemy.com/api-2.0/page/{page + 1}?token={secret}")
+        for page in range(_MAX_CURRICULUM_PAGES)
+    ]
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.side_effect = responses
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="límite seguro") as error:
+        await extractor._fetch_curriculum("42")
+
+    assert secret not in str(error.value)
+    assert "https://" not in str(error.value)
+    assert client.get.await_count == _MAX_CURRICULUM_PAGES
+    assert all(response.close.await_count == 1 for response in responses)
 
 
 # -- list_course exige una fuente de credenciales -----------------------------
@@ -454,8 +502,10 @@ async def test_resolve_extras_cierra_respuesta_si_falla_lectura() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_text_cierra_respuesta_si_falla_lectura() -> None:
-    response = AsyncMock()
-    response.text.side_effect = RuntimeError("synthetic read failure")
+    response = MagicMock()
+    response.status_code.as_int.return_value = 200
+    response.text = AsyncMock(side_effect=RuntimeError("synthetic read failure"))
+    response.close = AsyncMock()
     extractor = UdemyExtractor()
     client = AsyncMock()
     client.get.return_value = response

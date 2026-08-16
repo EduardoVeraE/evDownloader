@@ -32,7 +32,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import parse_qs, unquote_plus, urlencode, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlencode, urljoin, urlsplit
 
 import rnet
 from playwright.async_api import BrowserContext
@@ -70,7 +70,13 @@ _COURSE_ID_PAGE_RES = (
 )
 _DRM_REFRESH_ATTEMPTS = 3
 _DRM_REFRESH_BACKOFF_SECONDS = (1.0, 2.0)
+_MAX_REDIRECTS = 5
+# The API requests 1,000 items per page; this permits up to 100,000 curriculum
+# entries while bounding unique pagination URLs controlled by the provider.
+_MAX_CURRICULUM_PAGES = 100
 _UDEMY_PROVIDER_HOSTS = ("udemy.com",)
+_UDEMY_MEDIA_HOSTS = (*_UDEMY_PROVIDER_HOSTS, "udemycdn.com")
+_UDEMY_MEDIA_POLICY = URLPolicy("udemy", _UDEMY_MEDIA_HOSTS)
 
 
 class UdemyExtractor(Extractor):
@@ -91,7 +97,6 @@ class UdemyExtractor(Extractor):
         self._use_drm = False
         self._drm_license_server: str | None = None
         self._drm_token: str | None = None
-        self._cookie_header: str | None = None
         self._cookies: list[dict[str, Any]] = []
         self._cookies_loaded = False
         self._client: rnet.Client | None = None
@@ -104,10 +109,11 @@ class UdemyExtractor(Extractor):
         self._drm_token = settings.drm_token
         self._cookies = []
         self._cookies_loaded = False
-        self._cookie_header = None
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
+        if not self.url_policy.allows(url):
+            raise ValueError("Udemy rechazó una URL de curso no confiable.")
         if not self._load_cookies(required=True):
             raise ValueError(
                 "Udemy no tiene una sesión disponible. Ejecuta `evd login udemy` "
@@ -131,10 +137,11 @@ class UdemyExtractor(Extractor):
         persistir) esa sesión anónima: solo devuelve ``True`` si la API
         reconoce a un usuario autenticado.
         """
-        header = "; ".join(
-            f"{cookie['name']}={cookie['value']}"
-            for cookie in cookies
-            if browser.is_udemy_cookie(cookie) and cookie.get("name") and cookie.get("value")
+        url = f"{UDEMY_BASE_URL}/api-2.0/users/me/?fields[user]=id"
+        header = browser.cookie_header_for_url(
+            browser.cookies_as_records(browser.filter_cookies(self.name, cookies)),
+            url,
+            trusted_host_suffixes=self.url_policy.host_suffixes,
         )
         if not header:
             return False
@@ -145,8 +152,9 @@ class UdemyExtractor(Extractor):
         }
         try:
             resp = await self._rnet_client().get(
-                f"{UDEMY_BASE_URL}/api-2.0/users/me/?fields[user]=id",
+                url,
                 headers=headers,
+                allow_redirects=False,
             )
         except Exception:  # noqa: BLE001
             return False
@@ -189,15 +197,22 @@ class UdemyExtractor(Extractor):
             f"https://www.udemy.com/api-2.0/courses/{course_id}"
             f"/cached-subscriber-curriculum-items/?{params}"
         )
-        headers = self._api_headers()
         results: list[dict[str, Any]] = []
         visited: set[str] = set()
+        pages = 0
         while url:
+            if pages >= _MAX_CURRICULUM_PAGES:
+                raise ValueError("Udemy excedió el límite seguro de paginación del currículum.")
+            if not self.url_policy.allows(url):
+                raise ValueError("Udemy devolvió una paginación fuera del proveedor.")
             if url in visited:
                 raise ValueError("Udemy devolvió una paginación de currículum inválida.")
             visited.add(url)
+            pages += 1
             try:
-                resp = await self._rnet_client().get(url, headers=headers)
+                resp = await self._rnet_client().get(
+                    url, headers=self._api_headers(url), allow_redirects=False
+                )
                 data = json.loads(await self._response_text(resp))
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(
@@ -212,7 +227,7 @@ class UdemyExtractor(Extractor):
             if next_url is not None and not isinstance(next_url, str):
                 raise ValueError("Udemy devolvió una paginación de currículum inválida.")
             results.extend(page)
-            url = next_url
+            url = urljoin(url, next_url) if next_url else None
         return results
 
     def _build_course(
@@ -292,6 +307,8 @@ class UdemyExtractor(Extractor):
     async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Udemy rechazó una URL de clase no confiable.")
         cookies = self._load_cookies(required=True)
         if not cookies:
             raise ValueError(
@@ -316,6 +333,8 @@ class UdemyExtractor(Extractor):
         """Populate VideoSource.drm for DRM-protected Udemy lectures."""
         if not unit.url:
             return
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Udemy rechazó una URL de clase no confiable.")
         cookies = self._load_cookies()
         if not cookies and not self._cookies_from_browser:
             return
@@ -404,7 +423,11 @@ class UdemyExtractor(Extractor):
             f"&fields[asset]=asset_type,course_is_drmed,media_license_token,media_sources"
         )
         try:
-            resp = await self._rnet_client().get(url, headers=self._api_headers())
+            if not self.url_policy.allows(url):
+                return {}
+            resp = await self._rnet_client().get(
+                url, headers=self._api_headers(url), allow_redirects=False
+            )
             data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
             return {}
@@ -416,7 +439,8 @@ class UdemyExtractor(Extractor):
         """Return the DASH MPD URL from Udemy media_sources, if present."""
         for source in media_sources:
             if source.get("type") == "application/dash+xml" and source.get("src"):
-                return str(source["src"])
+                url = str(source["src"])
+                return url if _UDEMY_MEDIA_POLICY.allows(url) else None
         return None
 
     # -- Material complementario (recursos adjuntos y enlaces) ---------------
@@ -431,6 +455,8 @@ class UdemyExtractor(Extractor):
         """
         if not unit.url or not self._load_cookies():
             return UnitExtras()
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Udemy rechazó una URL de clase no confiable.")
         course_id, lecture_id = self._ids_from_url(unit.url)
         if not course_id or not lecture_id:
             return UnitExtras()
@@ -506,33 +532,60 @@ class UdemyExtractor(Extractor):
         return resources
 
     async def _fetch_text(self, url: str) -> str:
-        """Descarga el HTML de una página de udemy.com con las cookies del navegador.
+        """Fetch provider/CDN text through validated, credential-scoped redirects."""
+        current_url = url
+        visited: set[str] = set()
+        for hop in range(_MAX_REDIRECTS + 1):
+            if not _UDEMY_MEDIA_POLICY.allows(current_url) or current_url in visited:
+                return ""
+            visited.add(current_url)
+            headers = {"Referer": "https://www.udemy.com/"}
+            cookie = self._udemy_cookie_header(current_url)
+            if cookie:
+                headers["Cookie"] = cookie
+            try:
+                resp = await self._rnet_client().get(
+                    current_url, headers=headers, allow_redirects=False
+                )
+            except Exception:  # noqa: BLE001
+                return ""
+            try:
+                status = resp.status_code.as_int()
+                if status in {301, 302, 303, 307, 308}:
+                    location = resp.headers.get("location")
+                    if not isinstance(location, str) or not location or hop == _MAX_REDIRECTS:
+                        return ""
+                    current_url = urljoin(current_url, location)
+                    continue
+                if not 200 <= status < 300:
+                    return ""
+                return await resp.text()
+            except Exception:  # noqa: BLE001
+                return ""
+            finally:
+                with contextlib.suppress(Exception):
+                    await resp.close()
+        return ""
 
-        ``allow_redirects``: la URL del curso sin ``/`` final responde 301; sin
-        seguir el redirect, rnet devolvería un cuerpo vacío.
-        """
-        headers = {
-            "Cookie": self._udemy_cookie_header(),
-            "Referer": "https://www.udemy.com/",
-        }
-        try:
-            resp = await self._rnet_client().get(url, headers=headers, allow_redirects=True)
-            return await self._response_text(resp)
-        except Exception:  # noqa: BLE001
-            return ""
-
-    def _api_headers(self) -> dict[str, str]:
+    def _api_headers(self, url: str) -> dict[str, str]:
         """Headers para las llamadas a la API 2.0 (autenticadas por cookies)."""
-        return {
-            "Cookie": self._udemy_cookie_header(),
+        headers = {
             "Referer": "https://www.udemy.com/",
             "X-Requested-With": "XMLHttpRequest",
         }
+        cookie = self._udemy_cookie_header(url)
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
 
     async def _fetch_course_title(self, course_id: str) -> str | None:
         url = f"https://www.udemy.com/api-2.0/courses/{course_id}/?fields[course]=title"
         try:
-            resp = await self._rnet_client().get(url, headers=self._api_headers())
+            if not self.url_policy.allows(url):
+                return None
+            resp = await self._rnet_client().get(
+                url, headers=self._api_headers(url), allow_redirects=False
+            )
             data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
             return None
@@ -556,7 +609,11 @@ class UdemyExtractor(Extractor):
             f"/lectures/{lecture_id}/?{params}"
         )
         try:
-            resp = await self._rnet_client().get(url, headers=self._api_headers())
+            if not self.url_policy.allows(url):
+                return {}
+            resp = await self._rnet_client().get(
+                url, headers=self._api_headers(url), allow_redirects=False
+            )
             data = json.loads(await self._response_text(resp))
         except Exception:  # noqa: BLE001
             return {}
@@ -577,16 +634,16 @@ class UdemyExtractor(Extractor):
             )
         return self._client
 
-    def _udemy_cookie_header(self) -> str:
-        """Construye (una vez) el header Cookie de Udemy desde la fuente común."""
-        if self._cookie_header is None:
-            cookies = self._load_cookies()
-            self._cookie_header = "; ".join(
-                f"{cookie['name']}={cookie['value']}"
-                for cookie in cookies
-                if browser.is_udemy_cookie(cookie)
+    def _udemy_cookie_header(self, url: str) -> str:
+        """Build an RFC-scoped Cookie header only inside Udemy's authority."""
+        return (
+            browser.cookie_header_for_url(
+                browser.cookies_as_records(self._load_cookies()),
+                url,
+                trusted_host_suffixes=self.url_policy.host_suffixes,
             )
-        return self._cookie_header
+            or ""
+        )
 
     def _load_cookies(self, *, required: bool = False) -> list[dict[str, Any]]:
         """Prioriza cookies frescas del navegador configurado.

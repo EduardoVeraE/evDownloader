@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+from urllib.parse import urljoin
 
 from playwright.async_api import BrowserContext, Request
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -128,10 +129,14 @@ class PlatziExtractor(Extractor):
 
     # -- Estructura del curso ------------------------------------------------
     async def list_course(self, ctx: BrowserContext | None, url: str) -> Course:
+        if not self.url_policy.allows(url):
+            raise ValueError("Platzi rechazó una URL de curso no confiable.")
         assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
         page = await ctx.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded")
+            response = await page.goto(url, wait_until="domcontentloaded")
+            if response is not None and not self.url_policy.allows(response.url):
+                raise ValueError("Platzi rechazó un redirect fuera del proveedor.")
             # Esperar a que el temario (renderizado en cliente) esté presente.
             with contextlib.suppress(Exception):
                 await page.wait_for_selector(
@@ -155,8 +160,9 @@ class PlatziExtractor(Extractor):
                 if not href or href in seen:
                     continue
                 seen.add(href)
-                if not href.startswith("http"):
-                    href = f"{PLATZI_BASE_URL}{href}"
+                href = urljoin(f"{PLATZI_BASE_URL}/", href)
+                if not self.url_policy.allows(href):
+                    continue
                 unit_index += 1
                 units.append(
                     Unit(
@@ -195,6 +201,8 @@ class PlatziExtractor(Extractor):
     async def resolve_video(self, ctx: BrowserContext | None, unit: Unit) -> VideoSource | None:
         if unit.type != UnitType.VIDEO or not unit.url:
             return None
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Platzi rechazó una URL de clase no confiable.")
         assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
@@ -213,7 +221,9 @@ class PlatziExtractor(Extractor):
 
         page.on("request", on_request)
         try:
-            await page.goto(unit.url, wait_until="domcontentloaded")
+            response = await page.goto(unit.url, wait_until="domcontentloaded")
+            if response is not None and not self.url_policy.allows(response.url):
+                raise ValueError("Platzi rechazó un redirect fuera del proveedor.")
             if not embed_urls and not m3u8_urls:
                 try:
                     request = await page.wait_for_event(
@@ -283,7 +293,7 @@ class PlatziExtractor(Extractor):
             frames = page.locator("iframe[src*='mdstrm.com']")
             for i in range(await frames.count()):
                 src = await frames.nth(i).get_attribute("src")
-                if src and _MDSTRM_EMBED_RE.search(src):
+                if src and _is_media_request(src) and _MDSTRM_EMBED_RE.search(src):
                     found.append(src)
         except Exception:
             pass
@@ -295,11 +305,15 @@ class PlatziExtractor(Extractor):
     ) -> UnitExtras:
         if not unit.url:
             return UnitExtras()
+        if not self.url_policy.allows(unit.url):
+            raise ValueError("Platzi rechazó una URL de clase no confiable.")
         assert ctx is not None  # Platzi requiere navegador (needs_browser=True)
 
         page = await ctx.new_page()
         try:
-            await page.goto(unit.url, wait_until="domcontentloaded")
+            response = await page.goto(unit.url, wait_until="domcontentloaded")
+            if response is not None and not self.url_policy.allows(response.url):
+                raise ValueError("Platzi rechazó un redirect fuera del proveedor.")
             # El panel de recursos se hidrata en cliente tras cargar el DOM, y la
             # lista de archivos/enlaces (FilesAndLinks) aparece después del resumen.
             with contextlib.suppress(Exception):
