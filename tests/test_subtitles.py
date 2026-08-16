@@ -17,6 +17,7 @@ def response(
     result.status_code.as_int.return_value = status
     result.headers = headers or {}
     result.bytes = AsyncMock(return_value=body)
+    result.close = AsyncMock()
     return result
 
 
@@ -69,12 +70,17 @@ async def test_save_subtitles_scopes_fresh_cookie_headers_per_url(tmp_path: Path
     source = VideoSource(
         url="https://video.example.test/master.m3u8",
         subtitles=subtitles,
-        http_headers={"Referer": "https://app.example.test", "cOoKiE": "old=leak"},
+        http_headers={
+            "Referer": "https://app.example.test",
+            "cOoKiE": "old=leak",
+            "Authorization": "Bearer synthetic-secret",
+        },
         cookies={"flattened": "secret-leak"},
         cookie_jar=[
             Cookie(name="a_session", value="a-secret", domain="a.example.test", path="/subs"),
             Cookie(name="b_session", value="b-secret", domain="b.example.test", path="/subs"),
         ],
+        trusted_host_suffixes=("example.test", "other.test"),
     )
 
     with patch("evdownloader.service.rnet.Client", return_value=client):
@@ -89,7 +95,33 @@ async def test_save_subtitles_scopes_fresh_cookie_headers_per_url(tmp_path: Path
     assert len({id(headers) for headers in sent_headers}) == 3
     assert "flattened" not in repr(sent_headers)
     assert "old=leak" not in repr(sent_headers)
+    assert "synthetic-secret" not in repr(sent_headers)
     assert report.saved_count == 3
+
+
+@pytest.mark.asyncio
+async def test_save_subtitles_rejects_untrusted_redirect_before_credentials(
+    tmp_path: Path,
+) -> None:
+    redirect = response(
+        status=302,
+        headers={"location": "https://evil.test/sub.vtt?token=synthetic"},
+    )
+    client = MagicMock()
+    client.get = AsyncMock(return_value=redirect)
+    source = VideoSource(
+        url="https://video.example.test/master.m3u8",
+        subtitles=[Subtitle(url="https://cdn.example.test/sub.vtt", lang="en")],
+        cookie_jar=[Cookie(name="session", value="synthetic", domain=".example.test")],
+        trusted_host_suffixes=("example.test",),
+    )
+
+    with patch("evdownloader.service.rnet.Client", return_value=client):
+        report = await _save_subtitles(source.subtitles, tmp_path / "lesson", source)
+
+    assert [failure.reason for failure in report.failures] == ["untrusted_host"]
+    assert client.get.await_count == 1
+    redirect.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

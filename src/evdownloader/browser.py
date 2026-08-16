@@ -176,11 +176,6 @@ def clear_session(platform: str) -> bool:
     return False
 
 
-def cookies_as_dict(cookies: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Convierte cookies de Playwright en un dict ``name -> value``."""
-    return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
-
-
 def cookies_as_records(cookies: Sequence[Mapping[str, Any]]) -> list[Cookie]:
     """Convierte cookies de Playwright en ``Cookie`` completos (para cookiefile)."""
     records: list[Cookie] = []

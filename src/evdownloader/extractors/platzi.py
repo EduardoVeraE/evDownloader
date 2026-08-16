@@ -259,8 +259,9 @@ class PlatziExtractor(Extractor):
                 await page.close()
 
         raw_cookies = await ctx.cookies()
-        cookies = browser.cookies_as_dict(raw_cookies)
-        cookie_jar = browser.cookies_as_records(raw_cookies)
+        cookie_jar = browser.filter_cookie_records(
+            browser.cookies_as_records(raw_cookies), _PLATZI_MEDIA_HOSTS
+        )
         headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": PLATZI_BASE_URL + "/"}
         subtitles = [Subtitle(url=url) for url in sorted(vtt_urls)]
 
@@ -270,8 +271,8 @@ class PlatziExtractor(Extractor):
                 url=embed_urls[0],
                 is_embed=True,
                 http_headers=headers,
-                cookies=cookies,
                 cookie_jar=cookie_jar,
+                trusted_host_suffixes=_PLATZI_MEDIA_HOSTS,
                 subtitles=subtitles,
             )
         if m3u8_urls:
@@ -280,8 +281,8 @@ class PlatziExtractor(Extractor):
                 url=m3u8_urls[0],
                 is_embed=False,
                 http_headers=headers,
-                cookies=cookies,
                 cookie_jar=cookie_jar,
+                trusted_host_suffixes=_PLATZI_MEDIA_HOSTS,
                 subtitles=subtitles,
             )
         return None

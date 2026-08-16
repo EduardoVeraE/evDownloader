@@ -14,7 +14,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import aiofiles
 import rnet
@@ -37,6 +37,7 @@ from .models import (
 )
 from .resource_download import download_resource
 from .resource_download import exception_name as _exception_name
+from .url_policy import URLPolicy, is_credential_header, parse_url_authority
 from .utils import numbered, safe_mkdir, slugify
 
 console = Console()
@@ -49,6 +50,7 @@ _WEBVTT_LEADING_WHITESPACE = b" \t\r\n"
 _REQUEST_TIMEOUT_S = 30
 _CONNECT_TIMEOUT_S = 10
 _READ_TIMEOUT_S = 30
+_MAX_SUBTITLE_REDIRECTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,29 +475,26 @@ async def _save_subtitles(
     saved_paths: list[Path] = []
     failures: list[SubtitleFailure] = []
     for track_index, (sub, sub_path) in enumerate(zip(subtitles, expected_paths, strict=True)):
-        headers = {
-            key: value for key, value in source.http_headers.items() if key.lower() != "cookie"
-        }
-        cookie_header = browser.cookie_header_for_url(source.cookie_jar, sub.url)
-        if cookie_header:
-            headers["Cookie"] = cookie_header
-
-        try:
-            resp = await client.get(sub.url, headers=headers)
-        except Exception:  # noqa: BLE001
-            failures.append(SubtitleFailure(track_index, sub.lang, "network_error"))
-            continue
-
-        status = resp.status_code
-        status_code = status.as_int()
-        if not status.is_success():
+        data, status_code, declared_header, request_failure = await _fetch_subtitle(
+            client, sub.url, source
+        )
+        if request_failure:
+            failure_size = None
+            if request_failure == "declared_too_large" and declared_header is not None:
+                failure_size = int(declared_header)
             failures.append(
-                SubtitleFailure(track_index, sub.lang, "http_status", http_status=status_code)
+                SubtitleFailure(
+                    track_index,
+                    sub.lang,
+                    request_failure,
+                    http_status=status_code,
+                    size=failure_size,
+                )
             )
             continue
+        assert data is not None and status_code is not None
 
         declared_size: int | None = None
-        declared_header = resp.headers.get("content-length")
         if declared_header is not None:
             try:
                 declared_size = int(declared_header)
@@ -510,14 +509,6 @@ async def _save_subtitles(
                     http_status=status_code,
                     size=declared_size,
                 )
-            )
-            continue
-
-        try:
-            data = await resp.bytes()
-        except Exception:  # noqa: BLE001
-            failures.append(
-                SubtitleFailure(track_index, sub.lang, "read_error", http_status=status_code)
             )
             continue
 
@@ -584,6 +575,72 @@ async def _save_subtitles(
         saved_paths=tuple(saved_paths),
         failures=tuple(failures),
     )
+
+
+async def _fetch_subtitle(
+    client: object, url: str, source: VideoSource
+) -> tuple[bytes | None, int | None, str | None, str | None]:
+    """Fetch one subtitle through trusted redirects and close every response once."""
+    authority = parse_url_authority(url)
+    suffixes = source.trusted_host_suffixes or (
+        (authority.hostname,) if authority is not None else ()
+    )
+    policy = URLPolicy("media", suffixes)
+    current_url = url
+    visited: set[str] = set()
+    for hop in range(_MAX_SUBTITLE_REDIRECTS + 1):
+        if not policy.allows(current_url):
+            return None, None, None, "untrusted_host"
+        if current_url in visited:
+            return None, None, None, "redirect_loop"
+        visited.add(current_url)
+        headers = {
+            key: value
+            for key, value in source.http_headers.items()
+            if not is_credential_header(key)
+        }
+        cookie_header = browser.cookie_header_for_url(
+            source.cookie_jar,
+            current_url,
+            trusted_host_suffixes=source.trusted_host_suffixes,
+        )
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        try:
+            response = await client.get(current_url, headers=headers, allow_redirects=False)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return None, None, None, "network_error"
+        try:
+            status = response.status_code
+            status_code = status.as_int()
+            if status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not isinstance(location, str) or not location or hop == _MAX_SUBTITLE_REDIRECTS:
+                    return None, status_code, None, "invalid_redirect"
+                current_url = urljoin(current_url, location)
+                continue
+            if not status.is_success():
+                return None, status_code, None, "http_status"
+            try:
+                declared_header = response.headers.get("content-length")
+                if isinstance(declared_header, str):
+                    try:
+                        if int(declared_header) > _MAX_SUBTITLE_BYTES:
+                            return None, status_code, declared_header, "declared_too_large"
+                    except ValueError:
+                        pass
+                return (
+                    await response.bytes(),
+                    status_code,
+                    declared_header if isinstance(declared_header, str) else None,
+                    None,
+                )
+            except Exception:  # noqa: BLE001
+                return None, status_code, None, "read_error"
+        finally:
+            with contextlib.suppress(Exception):
+                await response.close()
+    return None, None, None, "redirect_limit"
 
 
 async def _download_files(

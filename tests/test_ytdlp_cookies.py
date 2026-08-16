@@ -14,6 +14,7 @@ def test_ytdlp_usa_cookiefile_de_la_fuente_resuelta_y_lo_borra(tmp_path: Path) -
     source = VideoSource(
         url="https://www.udemy.com/course/example/",
         cookie_jar=[Cookie(name="access_token", value="not-for-output", domain=".udemy.com")],
+        trusted_host_suffixes=("udemy.com",),
     )
     exists_during_download = False
     has_cookie = False
@@ -41,10 +42,26 @@ def test_ytdlp_usa_cookiefile_de_la_fuente_resuelta_y_lo_borra(tmp_path: Path) -
     assert not cookiefile_path.exists()
 
 
-def test_ytdlp_conserva_fallback_explicito_al_navegador(tmp_path: Path) -> None:
-    source = VideoSource(url="https://www.udemy.com/course/example/")
+def test_ytdlp_filtra_fallback_explicito_del_navegador(tmp_path: Path) -> None:
+    source = VideoSource(
+        url="https://www.udemy.com/course/example/",
+        trusted_host_suffixes=("udemy.com",),
+    )
 
-    with patch("yt_dlp.YoutubeDL") as ytdl:
+    with (
+        patch(
+            "evdownloader.downloaders.ytdlp.browser.load_browser_cookies",
+            return_value=[
+                {
+                    "name": "access_token",
+                    "value": "provider",
+                    "domain": ".udemy.com",
+                },
+                {"name": "other", "value": "third-party", "domain": ".other.test"},
+            ],
+        ),
+        patch("yt_dlp.YoutubeDL") as ytdl,
+    ):
         instance = MagicMock()
         ytdl.return_value.__enter__.return_value = instance
         ytdl.return_value.__exit__.return_value = False
@@ -60,4 +77,5 @@ def test_ytdlp_conserva_fallback_explicito_al_navegador(tmp_path: Path) -> None:
         )
 
     options = ytdl.call_args.args[0]
-    assert options["cookiesfrombrowser"] == ("brave", None, None, None)
+    assert "cookiesfrombrowser" not in options
+    assert not Path(options["cookiefile"]).exists()

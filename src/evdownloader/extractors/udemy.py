@@ -321,8 +321,8 @@ class UdemyExtractor(Extractor):
         source = VideoSource(
             url=unit.url,
             is_embed=True,
-            cookies=browser.cookies_as_dict(cookies),
             cookie_jar=browser.cookies_as_records(cookies),
+            trusted_host_suffixes=_UDEMY_MEDIA_HOSTS,
             write_subs=True,
         )
         if self._use_drm:

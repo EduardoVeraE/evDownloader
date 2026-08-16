@@ -81,7 +81,10 @@ async def test_download_subtitles_stages_validates_and_publishes_only_this_attem
     unrelated = tmp_path / "01-Node.js.fr.vtt"
     unrelated.write_text("WEBVTT\n\nold", encoding="utf-8")
     source = _source(
-        http_headers={"Referer": "https://example.test/"},
+        http_headers={
+            "Referer": "https://example.test/",
+            "Authorization": "Bearer synthetic-secret",
+        },
         cookie_jar=[Cookie(name="access_token", value="secret", domain=".example.test")],
         drm={"scheme": "widevine"},
     )
@@ -119,7 +122,8 @@ async def test_download_subtitles_stages_validates_and_publishes_only_this_attem
     assert options["writesubtitles"] is True
     assert options["subtitleslangs"] == ["es", "en"]
     assert options["subtitlesformat"] == "vtt/best"
-    assert options["http_headers"] == source.http_headers
+    assert options["http_headers"] == {"Referer": "https://example.test/"}
+    assert "synthetic-secret" not in repr(options)
     assert "format" not in options
     assert "merge_output_format" not in options
     assert "postprocessors" not in options
@@ -235,39 +239,47 @@ async def test_download_subtitles_rejects_sources_not_managed_by_downloader(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source", "settings", "expected_key", "expected_value"),
-    [
-        (
-            _source(),
-            Settings(cookies_from_browser="brave"),
-            "cookiesfrombrowser",
-            ("brave", None, None, None),
-        ),
-        (
-            _source(
-                http_headers={"Referer": "https://example.test/"},
-                cookies={"session": "secret"},
-            ),
-            Settings(),
-            "http_headers",
-            {"Referer": "https://example.test/", "Cookie": "session=secret"},
-        ),
-    ],
-)
-async def test_download_subtitles_uses_normal_cookie_fallbacks(
+async def test_download_subtitles_filters_browser_fallback_to_cookiefile(
     tmp_path: Path,
-    source: VideoSource,
-    settings: Settings,
-    expected_key: str,
-    expected_value: object,
 ) -> None:
-    with patch("yt_dlp.YoutubeDL") as ytdl:
+    source = _source(trusted_host_suffixes=("example.test",))
+    with (
+        patch(
+            "evdownloader.downloaders.ytdlp.browser.load_browser_cookies",
+            return_value=[
+                {"name": "session", "value": "provider", "domain": ".example.test"},
+                {"name": "other", "value": "third-party", "domain": ".other.test"},
+            ],
+        ),
+        patch("yt_dlp.YoutubeDL") as ytdl,
+    ):
         _mock_ytdl(ytdl)
-        result = await YtDlpDownloader().download_subtitles(source, tmp_path / "lesson", settings)
+        result = await YtDlpDownloader().download_subtitles(
+            source,
+            tmp_path / "lesson",
+            Settings(cookies_from_browser="brave"),
+        )
 
     assert result == []
-    assert ytdl.call_args.args[0][expected_key] == expected_value
+    options = ytdl.call_args.args[0]
+    assert "cookiesfrombrowser" not in options
+    assert not Path(options["cookiefile"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_download_subtitles_does_not_forward_hostless_cookie_fallback(
+    tmp_path: Path,
+) -> None:
+    source = _source(
+        http_headers={"Referer": "https://example.test/"},
+        cookies={"session": "secret"},
+    )
+    with patch("yt_dlp.YoutubeDL") as ytdl:
+        _mock_ytdl(ytdl)
+        result = await YtDlpDownloader().download_subtitles(source, tmp_path / "lesson", Settings())
+
+    assert result == []
+    assert ytdl.call_args.args[0]["http_headers"] == {"Referer": "https://example.test/"}
 
 
 def test_normal_fallback_chooses_webm_over_manifest(tmp_path: Path) -> None:

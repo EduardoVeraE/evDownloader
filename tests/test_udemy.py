@@ -295,9 +295,10 @@ def test_resolve_video_comparte_sesion_persistida_con_ytdlp() -> None:
         src = asyncio.run(ex.resolve_video(None, unit))
 
     assert src is not None
-    assert src.cookies == {"access_token": "not-for-output"}
+    assert src.cookies == {}
     assert src.cookie_jar[0].name == "access_token"
     assert len(src.cookie_jar) == 1
+    assert src.trusted_host_suffixes == ("udemy.com", "udemycdn.com")
 
 
 def test_resolve_video_con_use_drm_detecta_metadata() -> None:

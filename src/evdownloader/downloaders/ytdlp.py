@@ -24,8 +24,10 @@ from pathlib import Path
 
 from rich.console import Console
 
+from .. import browser
 from ..config import Settings
 from ..models import Cookie, DrmInfo, DrmRefresher, VideoSource
+from ..url_policy import URLPolicy, is_credential_header, parse_url_authority
 from .base import Downloader
 
 console = Console()
@@ -61,7 +63,11 @@ class YtDlpDownloader(Downloader):
     def _common_options(source: VideoSource, dest: Path, settings: Settings) -> dict:
         return {
             "outtmpl": str(dest) + ".%(ext)s",
-            "http_headers": source.http_headers,
+            "http_headers": {
+                key: value
+                for key, value in source.http_headers.items()
+                if not is_credential_header(key)
+            },
             "concurrent_fragment_downloads": settings.concurrency,
             "retries": 5,
             "fragment_retries": 5,
@@ -78,24 +84,10 @@ class YtDlpDownloader(Downloader):
         opts = dict(base_opts)
         cookiefile: str | None = None
         try:
-            if source.cookie_jar:
-                cookiefile = self._write_cookiefile(source.cookie_jar)
+            cookie_jar = self._credential_cookies(source, settings)
+            if cookie_jar:
+                cookiefile = self._write_cookiefile(cookie_jar)
                 opts["cookiefile"] = cookiefile
-            elif settings.cookies_from_browser:
-                # yt-dlp lee las cookies directamente del navegador real del
-                # usuario (Udemy: evita login/cookiefile y pasa Cloudflare).
-                opts["cookiesfrombrowser"] = (
-                    settings.cookies_from_browser,
-                    None,
-                    None,
-                    None,
-                )
-            elif source.cookies:
-                # Respaldo si no hay cookies completas: header (deprecado).
-                opts["http_headers"] = {
-                    **source.http_headers,
-                    "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
-                }
             yield opts
         finally:
             if cookiefile and os.path.exists(cookiefile):
@@ -104,6 +96,8 @@ class YtDlpDownloader(Downloader):
     def _run(self, source: VideoSource, dest: Path, settings: Settings) -> Path:
         import yt_dlp
 
+        if not self._source_policy(source).allows(source.url):
+            raise RuntimeError("yt-dlp rechazó una fuente no confiable.")
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # DRM path: download encrypted media, then decrypt with mp4decrypt.
@@ -181,6 +175,8 @@ class YtDlpDownloader(Downloader):
     def _run_subtitles(self, source: VideoSource, dest: Path, settings: Settings) -> list[Path]:
         import yt_dlp
 
+        if not self._source_policy(source).allows(source.url):
+            raise RuntimeError("yt-dlp rechazó una fuente no confiable.")
         if not source.write_subs:
             raise ValueError("Downloader-managed subtitle recovery requires source.write_subs=True")
 
@@ -254,6 +250,11 @@ class YtDlpDownloader(Downloader):
         from ..drm import normalize_widevine_license_input, prove_decrypt_path
         from ..drm.license import post_license_challenge
 
+        if not self._source_policy(source).allows(source.url):
+            raise RuntimeError("yt-dlp rechazó una fuente DRM no confiable.")
+        drm = source.drm
+        if drm is None:
+            raise RuntimeError("DRM metadata is required for a DRM download.")
         if not settings.drm_device:
             raise RuntimeError(
                 "DRM decryption requires a .wvd device file. "
@@ -284,7 +285,11 @@ class YtDlpDownloader(Downloader):
                 "outtmpl": outtmpl,
                 "merge_output_format": "mp4",
                 "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-                "http_headers": source.http_headers,
+                "http_headers": {
+                    key: value
+                    for key, value in source.http_headers.items()
+                    if not is_credential_header(key)
+                },
                 "concurrent_fragment_downloads": settings.concurrency,
                 "retries": 5,
                 "fragment_retries": 5,
@@ -297,16 +302,10 @@ class YtDlpDownloader(Downloader):
                 "format": "bv*+ba/b",
             }
 
-            if source.cookie_jar:
-                cookiefile = self._write_cookiefile(source.cookie_jar)
+            cookie_jar = self._credential_cookies(source, settings)
+            if cookie_jar:
+                cookiefile = self._write_cookiefile(cookie_jar)
                 base_opts["cookiefile"] = cookiefile
-            elif settings.cookies_from_browser:
-                base_opts["cookiesfrombrowser"] = (settings.cookies_from_browser, None, None, None)
-            elif source.cookies:
-                base_opts["http_headers"] = {
-                    **source.http_headers,
-                    "Cookie": "; ".join(f"{k}={v}" for k, v in source.cookies.items()),
-                }
 
             with yt_dlp.YoutubeDL(base_opts) as ydl:
                 ydl.download([source.url])
@@ -324,7 +323,11 @@ class YtDlpDownloader(Downloader):
         # Refresh only when the source provides a safe mechanism and no explicit
         # token was supplied. This runs after media download and before challenge.
         refresher = source.drm_refresher
-        if not settings.drm_token and refresher is not None:
+        candidate_license_url = settings.drm_license_server or drm.license_url
+        provider_license = bool(
+            candidate_license_url and self._source_policy(source).allows(candidate_license_url)
+        )
+        if not settings.drm_token and provider_license and refresher is not None:
             try:
                 refreshed = asyncio.run(_run_drm_refresher(refresher))
             except ValueError as exc:
@@ -334,6 +337,7 @@ class YtDlpDownloader(Downloader):
             if refreshed is None or not refreshed.token:
                 raise RuntimeError("DRM token refresh returned no token.")
             source.drm = refreshed
+            drm = refreshed
 
         # Normalize license input only after the late refresh so the challenge uses
         # the newest provider token. Explicit CLI values still win in the normalizer.
@@ -373,6 +377,25 @@ class YtDlpDownloader(Downloader):
                 encrypted_path.unlink()
 
         return result.output_path
+
+    @staticmethod
+    def _source_policy(source: VideoSource) -> URLPolicy:
+        authority = parse_url_authority(source.url)
+        suffixes = source.trusted_host_suffixes or (
+            (authority.hostname,) if authority is not None else ()
+        )
+        return URLPolicy("media", suffixes)
+
+    @classmethod
+    def _credential_cookies(cls, source: VideoSource, settings: Settings) -> list[Cookie]:
+        """Return only cookies inside the source's explicit authority boundary."""
+        policy = cls._source_policy(source)
+        cookies = source.cookie_jar
+        if not cookies and settings.cookies_from_browser:
+            cookies = browser.cookies_as_records(
+                browser.load_browser_cookies(settings.cookies_from_browser)
+            )
+        return browser.filter_cookie_records(cookies, policy.host_suffixes)
 
     @staticmethod
     def _encrypted_artifacts(dest: Path, staging_id: str) -> list[Path]:
