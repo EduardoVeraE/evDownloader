@@ -14,6 +14,7 @@ from evdownloader.models import DrmInfo
 
 # -- helpers ----------------------------------------------------------------
 
+
 def _make_drm(**kwargs: object) -> DrmInfo:
     defaults = {
         "scheme": "widevine",
@@ -68,9 +69,7 @@ class TestCLIPrecedence:
 
     def test_override_license_url_wins(self) -> None:
         drm = _make_drm(license_url="https://provider.com")
-        result = normalize_widevine_license_input(
-            drm, override_license_url="https://override.com"
-        )
+        result = normalize_widevine_license_input(drm, override_license_url="https://override.com")
         assert result.license_url == "https://override.com"
 
     def test_override_token_wins(self) -> None:
@@ -78,16 +77,12 @@ class TestCLIPrecedence:
             license_url="https://license.example.com",
             token="provider-token",
         )
-        result = normalize_widevine_license_input(
-            drm, override_token="cli-token"
-        )
+        result = normalize_widevine_license_input(drm, override_token="cli-token")
         assert result.token == "cli-token"
 
     def test_default_license_url_fallback(self) -> None:
         drm = _make_drm(license_url=None)
-        result = normalize_widevine_license_input(
-            drm, default_license_url="https://default.com"
-        )
+        result = normalize_widevine_license_input(drm, default_license_url="https://default.com")
         assert result.license_url == "https://default.com"
 
     def test_override_beats_default(self) -> None:
@@ -113,17 +108,13 @@ class TestHeadersMerge:
             license_url="https://license.example.com",
             headers={"X-A": "provider", "X-B": "only-provider"},
         )
-        result = normalize_widevine_license_input(
-            drm, extra_headers={"X-A": "extra"}
-        )
+        result = normalize_widevine_license_input(drm, extra_headers={"X-A": "extra"})
         assert result.headers["X-A"] == "extra"
         assert result.headers["X-B"] == "only-provider"
 
     def test_extras_only(self) -> None:
         drm = _make_drm(license_url="https://license.example.com")
-        result = normalize_widevine_license_input(
-            drm, extra_headers={"X-New": "val"}
-        )
+        result = normalize_widevine_license_input(drm, extra_headers={"X-New": "val"})
         assert result.headers == {"X-New": "val"}
 
 
@@ -155,7 +146,7 @@ class TestRedactedSummary:
         summary = result.safe_summary()
         assert "secret" not in summary
         assert "Authorization=***" in summary
-        assert "X-Custom=visible" in summary
+        assert "X-Custom=***" in summary
 
     def test_token_like_header_redacted(self) -> None:
         drm = _make_drm(
@@ -166,7 +157,7 @@ class TestRedactedSummary:
         summary = result.safe_summary()
         assert "secret-token" not in summary
         assert "X-Auth-Token=***" in summary
-        assert "X-Custom=visible" in summary
+        assert "X-Custom=***" in summary
 
     def test_cookie_header_redacted(self) -> None:
         drm = _make_drm(
@@ -196,7 +187,7 @@ class TestRedactedSummary:
         result = normalize_widevine_license_input(drm)
         summary = result.safe_summary()
         assert "secret-jwt" not in summary
-        assert "auth_token=%2A%2A%2A" in summary
+        assert "license_url=<udemy>" in summary
 
 
 class TestValidationErrors:
@@ -254,8 +245,7 @@ class TestUdemyProxyUrl:
     def test_replaces_existing_drm_params(self) -> None:
         drm = _make_drm(
             license_url=(
-                f"{UDEMY_WIDEVINE_PROXY_URL}"
-                "?drm_type=playready&auth_token=old&tenant=udemy"
+                f"{UDEMY_WIDEVINE_PROXY_URL}?drm_type=playready&auth_token=old&tenant=udemy"
             ),
             token="secret-jwt",
         )
@@ -286,4 +276,4 @@ class TestUdemyProxyUrl:
         summary = runtime_input.safe_summary()
 
         assert "secret-jwt" not in summary
-        assert "auth_token=%2A%2A%2A" in summary
+        assert "license_url=<udemy>" in summary

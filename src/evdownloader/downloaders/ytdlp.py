@@ -266,15 +266,6 @@ class YtDlpDownloader(Downloader):
                 f"Device file not found: {device_path}. Provide a valid .wvd file via --drm-device."
             )
 
-        # Build Cookie header from source cookies for the license POST.
-        extra_headers: dict[str, str] = {}
-        if source.cookie_jar:
-            cookie_str = "; ".join(f"{c.name}={c.value}" for c in source.cookie_jar)
-            extra_headers["Cookie"] = cookie_str
-        elif source.cookies:
-            extra_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in source.cookies.items())
-        extra_headers.setdefault("Referer", "https://www.udemy.com/")
-
         # Isolate each attempt so a retry never consumes a previous attempt's files.
         staging_id = uuid.uuid4().hex
         outtmpl = str(dest) + f".encrypted.{staging_id}.%(ext)s"
@@ -342,11 +333,26 @@ class YtDlpDownloader(Downloader):
         # Normalize license input only after the late refresh so the challenge uses
         # the newest provider token. Explicit CLI values still win in the normalizer.
         try:
+            extra_headers: dict[str, str] = {}
+            license_url = settings.drm_license_server or drm.license_url
+            if license_url:
+                cookie = browser.cookie_header_for_url(
+                    self._credential_cookies(source, settings),
+                    license_url,
+                    trusted_host_suffixes=source.trusted_host_suffixes,
+                )
+                if cookie:
+                    extra_headers["Cookie"] = cookie
+                if self._source_policy(source).allows(license_url):
+                    referer = source.http_headers.get("Referer")
+                    if referer:
+                        extra_headers["Referer"] = referer
             license_input = normalize_widevine_license_input(
-                source.drm,  # type: ignore[arg-type]
+                drm,
                 override_license_url=settings.drm_license_server,
                 override_token=settings.drm_token,
                 extra_headers=extra_headers,
+                trusted_host_suffixes=source.trusted_host_suffixes,
             )
         except Exception as exc:
             raise RuntimeError(f"DRM license input error: {exc}") from exc

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from evdownloader import browser
+from evdownloader.drm.license import (
+    LicenseInputError,
+    LicensePostError,
+    normalize_widevine_license_input,
+    post_license_challenge,
+)
 from evdownloader.extractors import get_extractor
 from evdownloader.extractors.codigofacilito import CodigofacilitoExtractor
 from evdownloader.extractors.platzi import PlatziExtractor, _is_media_request
 from evdownloader.extractors.udemy import UdemyExtractor
-from evdownloader.models import Cookie
+from evdownloader.models import Cookie, DrmInfo
 from evdownloader.resource_download import _trusted_url
 from evdownloader.url_policy import URLPolicy, parse_url_authority
 
@@ -269,3 +275,103 @@ async def test_platzi_rejects_untrusted_final_navigation_url() -> None:
     with pytest.raises(ValueError, match="redirect fuera del proveedor"):
         await PlatziExtractor().list_course(context, "https://platzi.com/courses/test")
     page.close.assert_awaited_once_with()
+
+
+def _drm(**updates: object) -> DrmInfo:
+    values: dict[str, object] = {
+        "scheme": "widevine",
+        "license_url": "https://www.udemy.com/license",
+        "pssh": "AAAA",
+        "token": "provider-token",
+        "headers": {"Authorization": "Bearer provider", "X-Public": "provider"},
+    }
+    values.update(updates)
+    return DrmInfo(**values)  # type: ignore[arg-type]
+
+
+def test_external_drm_override_drops_provider_credentials() -> None:
+    result = normalize_widevine_license_input(
+        _drm(),
+        override_license_url="https://license.external.test:8443/path",
+        extra_headers={"Cookie": "provider=synthetic"},
+        trusted_host_suffixes=("udemy.com",),
+    )
+    assert result.token is None
+    assert result.headers == {}
+
+
+def test_external_drm_override_preserves_explicit_user_token_only() -> None:
+    result = normalize_widevine_license_input(
+        _drm(),
+        override_license_url="https://license.external.test/path",
+        override_token="explicit-token",
+        trusted_host_suffixes=("udemy.com",),
+    )
+    assert result.token == "explicit-token"
+    assert result.headers == {}
+
+
+def test_zero_port_drm_override_is_rejected_before_classification() -> None:
+    with pytest.raises(LicenseInputError, match="safe HTTPS authority"):
+        normalize_widevine_license_input(
+            _drm(),
+            override_license_url="https://www.udemy.com:0/license",
+            extra_headers={"Cookie": "provider=synthetic"},
+            trusted_host_suffixes=("udemy.com",),
+        )
+
+
+def test_trailing_dot_drm_override_is_rejected() -> None:
+    with pytest.raises(LicenseInputError, match="safe HTTPS authority"):
+        normalize_widevine_license_input(
+            _drm(),
+            override_license_url="https://www.udemy.com./license",
+            trusted_host_suffixes=("udemy.com",),
+        )
+
+
+def test_provider_generated_external_license_url_fails_closed() -> None:
+    with pytest.raises(LicenseInputError, match="untrusted"):
+        normalize_widevine_license_input(
+            _drm(license_url="https://license.external.test/path"),
+            trusted_host_suffixes=("udemy.com",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_license_post_validates_before_request_and_closes_once() -> None:
+    client = MagicMock()
+    client.post = AsyncMock()
+    with (
+        patch("rnet.Client", return_value=client),
+        pytest.raises(LicensePostError, match="unsafe authority"),
+    ):
+        await post_license_challenge("https://user@license.external.test/path", b"challenge", {})
+    client.post.assert_not_awaited()
+
+    response = _Response(200)
+    client.post = AsyncMock(return_value=response)
+    with patch("rnet.Client", return_value=client):
+        assert (
+            await post_license_challenge("https://license.external.test/path", b"challenge", {})
+            == b"license"
+        )
+    assert client.post.await_args.kwargs["allow_redirects"] is False
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_zero_port_license_post_rejects_before_request_or_response() -> None:
+    response = _Response(200)
+    client = MagicMock()
+    client.post = AsyncMock(return_value=response)
+    with (
+        patch("rnet.Client", return_value=client) as client_factory,
+        pytest.raises(LicensePostError, match="unsafe authority"),
+    ):
+        await post_license_challenge("https://license.external.test:0/path", b"challenge", {})
+
+    client_factory.assert_not_called()
+    client.post.assert_not_awaited()
+    response.bytes.assert_not_awaited()
+    response.close.assert_not_awaited()

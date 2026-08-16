@@ -153,9 +153,7 @@ def download(
     limit: int | None = typer.Option(
         None, "-n", "--limit", help="Descargar solo las primeras N clases de video."
     ),
-    cache: bool = typer.Option(
-        False, "--cache", help="Usar la caché de estructura del curso."
-    ),
+    cache: bool = typer.Option(False, "--cache", help="Usar la caché de estructura del curso."),
     no_resources: bool = typer.Option(
         False, "--no-resources", help="No descargar resumen, adjuntos, enlaces ni MHTML."
     ),
@@ -176,7 +174,10 @@ def download(
     drm_license_server: str | None = typer.Option(
         None,
         "--drm-license-server",
-        help="Override de la URL de la license server DRM.",
+        help=(
+            "URL HTTPS explícita del servidor DRM; no recibe credenciales "
+            "del proveedor si es externo."
+        ),
     ),
     drm_token: str | None = typer.Option(
         None,
@@ -257,7 +258,7 @@ def drm_proof(
     headers: dict[str, str] = {}
     for h in header:
         if ":" not in h:
-            console.print(f"[red]Header inválido (falta ':'): {h}[/red]")
+            console.print("[red]Header inválido: falta ':'.[/red]")
             raise typer.Exit(code=1)
         name, value = h.split(":", 1)
         headers[name.strip()] = value.strip()

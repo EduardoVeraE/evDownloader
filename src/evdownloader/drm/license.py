@@ -7,35 +7,16 @@ that never leaks secrets.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..models import DrmInfo
+from ..url_policy import URLPolicy, parse_url_authority, safe_url_label
 
 # Udemy's Widevine proxy endpoint (used when no override is provided).
 UDEMY_WIDEVINE_PROXY_URL = "https://www.udemy.com/media-license-server/validate-auth-token"
 _WIDEVINE_DRM_TYPE = "widevine"
-
-_SENSITIVE_HEADER_PARTS = ("authorization", "cookie", "token", "secret", "key")
-_SENSITIVE_QUERY_KEYS = frozenset({"auth_token", "token", "access_token", "key", "secret"})
-
-
-def _is_sensitive_header(name: str) -> bool:
-    """Return True if a header name likely carries secret material."""
-    normalized = name.lower()
-    return any(part in normalized for part in _SENSITIVE_HEADER_PARTS)
-
-
-def _redact_url(url: str) -> str:
-    """Redact known secret-bearing query parameters from a URL."""
-    parts = urlsplit(url)
-    if not parts.query:
-        return url
-    query = [
-        (key, "***" if key.lower() in _SENSITIVE_QUERY_KEYS else value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-    ]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 class LicenseInputError(ValueError):
@@ -61,13 +42,7 @@ class WidevineLicenseInput:
 
     def redacted_headers(self) -> dict[str, str]:
         """Return a copy of headers with sensitive values replaced by ``***``."""
-        out: dict[str, str] = {}
-        for k, v in self.headers.items():
-            if _is_sensitive_header(k):
-                out[k] = "***"
-            else:
-                out[k] = v
-        return out
+        return {key: "***" for key in self.headers}
 
     def safe_summary(self) -> str:
         """Human-readable summary safe for logs (no secrets)."""
@@ -76,7 +51,7 @@ class WidevineLicenseInput:
         return (
             f"WidevineLicenseInput("
             f"scheme={self.scheme}, "
-            f"license_url={_redact_url(self.license_url)}, "
+            f"license_url=<{safe_url_label(self.license_url)}>, "
             f"pssh=<len:{len(self.pssh)}>, "
             f"key_id={self.key_id or 'none'}, "
             f"token_present={self.token_present()}, "
@@ -91,6 +66,7 @@ def normalize_widevine_license_input(
     override_license_url: str | None = None,
     override_token: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    trusted_host_suffixes: tuple[str, ...] = (),
 ) -> WidevineLicenseInput:
     """Merge provider DRM info with CLI overrides into a validated input.
 
@@ -123,11 +99,21 @@ def normalize_widevine_license_input(
             "the manifest, or the provider default."
         )
 
-    token = override_token if override_token else drm.token
+    authority = parse_url_authority(license_url)
+    if authority is None:
+        raise LicenseInputError("The DRM license URL is not a safe HTTPS authority.")
+    trusted_policy = URLPolicy("provider", trusted_host_suffixes)
+    outside_provider = bool(trusted_host_suffixes) and not trusted_policy.allows_authority(
+        authority
+    )
+    if outside_provider and override_license_url is None:
+        raise LicenseInputError("The provider returned an untrusted DRM license authority.")
+
+    token = override_token if override_token else (None if outside_provider else drm.token)
 
     # Merge headers: provider first, extras on top (explicit overrides win).
-    headers = dict(drm.headers)
-    if extra_headers:
+    headers = {} if outside_provider else dict(drm.headers)
+    if extra_headers and not outside_provider:
         headers.update(extra_headers)
 
     return WidevineLicenseInput(
@@ -144,7 +130,7 @@ def build_udemy_widevine_proxy_url(license_input: WidevineLicenseInput) -> str:
     """Build Udemy's runtime Widevine proxy URL with ``auth_token``.
 
     The returned URL contains the token and must never be logged directly. Use
-    ``safe_summary()`` or ``_redact_url()`` for human-readable output.
+    ``safe_summary()`` for human-readable output.
     """
     if license_input.scheme != "widevine":
         raise LicenseInputError(
@@ -196,22 +182,24 @@ async def post_license_challenge(
 
     from ..config import RNET_IMPERSONATE
 
+    if parse_url_authority(url) is None:
+        raise LicensePostError("License POST rejected an unsafe authority")
+
     send_headers = dict(headers)
     if "Content-Type" not in send_headers and "content-type" not in send_headers:
         send_headers["Content-Type"] = "application/octet-stream"
 
     try:
         client = rnet.Client(impersonate=getattr(rnet.Impersonate, RNET_IMPERSONATE, None))
-        resp = await client.post(url, body=challenge, headers=send_headers)
+        resp = await client.post(url, body=challenge, headers=send_headers, allow_redirects=False)
     except Exception as exc:
-        raise LicensePostError(
-            f"License POST network error: {type(exc).__name__}"
-        ) from exc
+        raise LicensePostError(f"License POST network error: {type(exc).__name__}") from exc
 
-    status = resp.status_code
-    if not status.is_success():
-        raise LicensePostError(
-            f"License server returned HTTP {status.as_int()}"
-        )
-
-    return await resp.bytes()
+    try:
+        status = resp.status_code
+        if not status.is_success():
+            raise LicensePostError(f"License server returned HTTP {status.as_int()}")
+        return await resp.bytes()
+    finally:
+        with contextlib.suppress(Exception):
+            await resp.close()

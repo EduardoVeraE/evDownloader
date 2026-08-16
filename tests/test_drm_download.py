@@ -426,9 +426,7 @@ class TestUdemyDrmHandoff:
         """Under use_drm, source.url is the MPD, is_embed=False, write_subs=False."""
         ex = UdemyExtractor()
         ex.configure(Settings(cookies_from_browser="brave", use_drm=True))
-        ex._cookies = [
-            {"name": "access_token", "value": "token", "domain": ".udemy.com"}
-        ]
+        ex._cookies = [{"name": "access_token", "value": "token", "domain": ".udemy.com"}]
         ex._cookies_loaded = True
         unit = Unit(
             title="x",
@@ -471,9 +469,7 @@ class TestUdemyDrmHandoff:
     def test_non_drm_mode_preserves_defaults(self) -> None:
         """Without use_drm, URL stays as lecture page, is_embed=True, write_subs=True."""
         ex = UdemyExtractor()
-        ex._cookies = [
-            {"name": "access_token", "value": "token", "domain": ".udemy.com"}
-        ]
+        ex._cookies = [{"name": "access_token", "value": "token", "domain": ".udemy.com"}]
         ex._cookies_loaded = True
         # No configure / use_drm defaults to False.
         unit = Unit(
@@ -620,7 +616,9 @@ class TestDrmProofCli:
         # Typer wraps the function; it should still be callable.
         assert callable(drm_proof)
 
-    def test_drm_proof_callback_rejects_invalid_header(self) -> None:
+    def test_drm_proof_callback_rejects_invalid_header(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """A header without ':' is rejected."""
         from evdownloader.cli import drm_proof
 
@@ -633,9 +631,10 @@ class TestDrmProofCli:
                 pssh="AAAA",
                 token=None,
                 key_id=None,
-                header=["bad-header-no-colon"],
+                header=["synthetic-secret-no-colon"],
             )
         assert exc_info.value.exit_code == 1
+        assert "synthetic-secret" not in capsys.readouterr().out
 
     def test_drm_proof_callback_rejects_missing_input(self) -> None:
         """A non-existent input file is rejected."""

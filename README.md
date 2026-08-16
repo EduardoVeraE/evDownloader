@@ -196,6 +196,12 @@ evd download \
 `mp4decrypt`, la ejecución termina con un error explícito. El resultado final es
 el MP4 desencriptado dentro de `downloads/Udemy/<curso>/...`.
 
+Límite de confianza DRM: `--drm-license-server` acepta una autoridad HTTPS
+externa elegida explícitamente, pero no reenvía cookies, headers ni tokens del
+proveedor fuera de sus dominios de confianza. Para autenticar ese servidor
+externo debes proporcionar también su token explícito con `--drm-token`; los
+redirects del POST de licencia no se siguen.
+
 Limitación conocida: el flujo DRM actual puede no generar archivos VTT/SRT, esta
 en curso la investigación.
 
@@ -253,8 +259,8 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 | `--show-browser` | Mostrar el navegador (no headless) — solo Platzi |
 | `--use-drm` | Activar el flujo integrado de detección, descifrado y validación DRM |
 | `--drm-device` | Ruta al dispositivo Widevine `.wvd`; requerido junto con `--use-drm` |
-| `--drm-license-server` | Sobrescribir la URL del servidor de licencias; uso avanzado |
-| `--drm-token` | Sobrescribir el token DRM; uso avanzado, no necesario normalmente |
+| `--drm-license-server` | Autoridad HTTPS explícita para licencias; no recibe credenciales del proveedor si es externa |
+| `--drm-token` | Token explícito para el servidor DRM seleccionado; uso avanzado |
 
 ### Otros comandos
 
