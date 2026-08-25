@@ -17,6 +17,7 @@ APP_NAME = "evDownloader"
 # --- Rutas persistentes -----------------------------------------------------
 DATA_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 CACHE_DIR = DATA_DIR / "cache"
+CDMS_DIR = DATA_DIR / "CDMs"
 
 
 def session_file(platform: str) -> Path:
@@ -84,6 +85,7 @@ class Settings:
     drm_license_server: str | None = None  # override de la license server URL
     drm_token: str | None = None  # override del token de autorización DRM
     drm_device: Path | None = None  # ruta al archivo .wvd para Widevine CDM
+    cdms_dir: Path | None = None  # carpeta configurable de dispositivos Widevine
 
 
 def ensure_dirs() -> None:

@@ -19,14 +19,19 @@ from .config import Settings, ensure_dirs
 
 app = typer.Typer(
     name="evdownloader",
-    help="Descargador de cursos de video (Platzi, Udemy, Codigofacilito).",
+    help="Descargador de cursos de video (Platzi, Udemy, Codigofacilito, SharePoint).",
     no_args_is_help=True,
     add_completion=False,
 )
 console = Console()
 
-_PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy | codigofacilito.")
-_PLATFORMS = ("platzi", "udemy", "codigofacilito")
+_PLATFORM_ARG = typer.Argument(
+    "platzi", help="Plataforma: platzi | udemy | codigofacilito | sharepoint."
+)
+_LOGIN_PLATFORM_ARG = typer.Argument(
+    "platzi", help="Plataforma: platzi | udemy | codigofacilito."
+)
+_PLATFORMS = ("platzi", "udemy", "codigofacilito", "sharepoint")
 _PYPI_URL = "https://pypi.org/pypi/evdownloader/json"
 
 
@@ -116,8 +121,12 @@ def main(
 
 
 @app.command()
-def login(platform: str = _PLATFORM_ARG) -> None:
+def login(platform: str = _LOGIN_PLATFORM_ARG) -> None:
     """Inicia sesión en la plataforma (abre el navegador para login manual)."""
+    if platform.casefold() == "sharepoint":
+        raise typer.BadParameter(
+            "SharePoint solo admite autenticación mediante --cookies-from-browser chrome|edge."
+        )
     ensure_dirs()
     ok = asyncio.run(session.login(platform))
     raise typer.Exit(code=0 if ok else 1)
@@ -309,7 +318,11 @@ def drm_proof(
 @app.command()
 def status(
     platform: str | None = typer.Argument(
-        None, help="Plataforma: platzi | udemy | codigofacilito. Si se omite, muestra todas."
+        None,
+        help=(
+            "Plataforma: platzi | udemy | codigofacilito | sharepoint. "
+            "Si se omite, muestra todas."
+        ),
     ),
 ) -> None:
     """Muestra si hay una sesión activa en una o todas las plataformas."""

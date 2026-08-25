@@ -15,6 +15,7 @@ from evdownloader.drm.license import (
 from evdownloader.extractors import get_extractor
 from evdownloader.extractors.codigofacilito import CodigofacilitoExtractor
 from evdownloader.extractors.platzi import PlatziExtractor, _is_media_request
+from evdownloader.extractors.sharepoint import SharePointExtractor
 from evdownloader.extractors.udemy import UdemyExtractor
 from evdownloader.models import Cookie, DrmInfo
 from evdownloader.resource_download import _trusted_url
@@ -25,6 +26,15 @@ _PROVIDERS = [
     (UdemyExtractor, "udemy.com"),
     (CodigofacilitoExtractor, "codigofacilito.com"),
 ]
+
+
+def test_sharepoint_policy_accepts_folders_and_rejects_stream_entry_points() -> None:
+    assert SharePointExtractor.supports("https://tenant.sharepoint.com/Documents/Recordings")
+    assert not SharePointExtractor.supports(
+        "https://tenant.sharepoint.com/_layouts/15/stream.aspx?id=%2FDocuments%2Frecording.mp4"
+    )
+    assert not SharePointExtractor.supports("https://tenant.sharepoint.com.evil.test/Documents")
+    assert not SharePointExtractor.supports("http://tenant.sharepoint.com/Documents")
 
 
 @pytest.mark.parametrize(("extractor", "domain"), _PROVIDERS)

@@ -1,6 +1,7 @@
 # evDownloader
 
-Te ayuda a descargar cursos de **Platzi**, **Udemy** y **Codigofacilito** para verlos offline, debes tener acceso al curso en tu sesión.
+Te ayuda a descargar cursos de **Platzi**, **Udemy**, **Codigofacilito** y
+**SharePoint** para verlos offline; debes tener acceso al curso en tu sesión.
 Diseño extensible por *extractores* (una plataforma = un extractor) y motor de
 descarga **híbrido** sobre yt-dlp.
 
@@ -13,10 +14,13 @@ Cada plataforma se autentica de una de dos formas, según su anti-bot:
 | **Platzi** | Login manual asistido | `login` abre un navegador (Playwright) para que inicies sesión una vez; las cookies quedan guardadas |
 | **Udemy** | Sesión persistida o cookies del navegador real | Está tras Cloudflare Turnstile; usa la sesión guardada por `login` o `--cookies-from-browser` |
 | **Codigofacilito** | Cookies del navegador real | Video servido por BunnyCDN; se resuelve con yt-dlp y `--cookies-from-browser` |
+| **SharePoint** | Cookies de Chrome o Edge | Requiere una URL de folder HTTPS y enumera grabaciones mediante SharePoint REST |
 
 > Para **Udemy** puedes usar una sesión guardada con `evd login udemy` o leer las
 > cookies de un navegador real (Brave, Chrome, Safari, Edge o Firefox). Para
 > Codigofacilito se recomienda `--cookies-from-browser`.
+> SharePoint v1 solo acepta `--cookies-from-browser chrome` o `edge`; las cookies
+> se limitan a `*.sharepoint.com` y nunca se envían a redirects externos.
 
 ## Instalación
 
@@ -154,7 +158,7 @@ Sigue estos pasos antes de usar `evdownloader`:
    evdownloader setup
    ```
 
-   Udemy y Codigofacilito no necesitan Chromium de Playwright.
+    Udemy, Codigofacilito y SharePoint no necesitan Chromium de Playwright.
 
 ## Uso por plataforma
 
@@ -215,6 +219,24 @@ evdownloader download \
 ```
 
 La salida se organiza sola en `downloads/<Plataforma>/<curso>/<NN-módulo>/<NN-clase>.mp4`.
+
+### SharePoint
+
+La entrada debe ser un **folder** HTTPS de `*.sharepoint.com`, no un enlace de
+archivo `stream.aspx?id=...`:
+
+```bash
+evdownloader download \
+  "https://<tenant>.sharepoint.com/Documents/Grabaciones" \
+  --cookies-from-browser chrome
+```
+
+El extractor agrupa las grabaciones por título normalizado y crea una unidad
+por archivo. Los manifiestos Widevine usan el primer `.wvd` legible encontrado
+en la carpeta de datos `CDMs` (o el dispositivo indicado explícitamente).
+PlayReady y HLS AES no se descifran: el contenido puede conservarse como
+contenedor cifrado, pero evDownloader informa claramente la limitación y no
+afirma haberlo convertido en un MP4 limpio.
 
 ## Ejemplos
  Usa el comando `evdownload` o su alias `evd`

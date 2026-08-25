@@ -27,11 +27,13 @@ from .url_policy import hostname_matches, normalize_hostname, parse_url_authorit
 _SESSION_COOKIE_NAMES: dict[str, frozenset[str]] = {
     "udemy": frozenset({"access_token"}),
     "codigofacilito": frozenset({"_session_id", "_codigofacilito_session"}),
+    "sharepoint": frozenset({"FedAuth", "rtFa"}),
 }
 _PLATFORM_COOKIE_SUFFIXES = {
     "udemy": ("udemy.com",),
     "platzi": ("platzi.com",),
     "codigofacilito": ("codigofacilito.com",),
+    "sharepoint": ("sharepoint.com",),
 }
 
 

@@ -7,25 +7,25 @@ plataforma para poder añadir nuevas sin reescribirlo.
 
 from __future__ import annotations
 
-from ..url_policy import parse_url_authority
 from .base import Extractor
 from .codigofacilito import CodigofacilitoExtractor
 from .platzi import PlatziExtractor
+from .sharepoint import SharePointExtractor
 from .udemy import UdemyExtractor
 
 _EXTRACTORS: list[type[Extractor]] = [
     PlatziExtractor,
     UdemyExtractor,
     CodigofacilitoExtractor,
+    SharePointExtractor,
 ]
 _BY_NAME: dict[str, type[Extractor]] = {cls.name: cls for cls in _EXTRACTORS}
 
 
 def get_extractor(url: str) -> Extractor:
     """Devuelve la instancia de extractor que soporta la URL dada."""
-    authority = parse_url_authority(url)
     for cls in _EXTRACTORS:
-        if cls.url_policy.allows_authority(authority):
+        if cls.supports(url):
             return cls()
     raise ValueError("No hay extractor que soporte esa URL segura.")
 
@@ -43,6 +43,7 @@ __all__ = [
     "CodigofacilitoExtractor",
     "Extractor",
     "PlatziExtractor",
+    "SharePointExtractor",
     "UdemyExtractor",
     "get_extractor",
     "get_extractor_by_name",

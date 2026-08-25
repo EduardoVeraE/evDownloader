@@ -305,3 +305,25 @@ def test_load_cookies_restringe_archivo_existente(monkeypatch, tmp_path: Path) -
     browser.load_cookies("udemy")
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_sharepoint_cookie_persistence_is_scoped_to_provider_and_known_names(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "session-sharepoint.json"
+    monkeypatch.setattr(browser, "session_file", lambda platform: path)
+    monkeypatch.setattr(browser, "ensure_dirs", lambda: None)
+
+    browser.save_cookies(
+        [
+            {"name": "FedAuth", "value": "auth", "domain": ".sharepoint.com"},
+            {"name": "rtFa", "value": "refresh", "domain": "tenant.sharepoint.com"},
+            {"name": "sid", "value": "off-host", "domain": ".evil.test"},
+        ],
+        "sharepoint",
+    )
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))["cookies"]
+    assert [cookie["name"] for cookie in persisted] == ["FedAuth", "rtFa"]
+    assert browser.load_cookies("sharepoint") == persisted
+    assert browser.has_usable_session("sharepoint", persisted)
