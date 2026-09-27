@@ -57,6 +57,19 @@ async def _poll_auth_cookie(
         await asyncio.sleep(interval)
 
 
+async def _poll_verified_udemy_session(
+    ctx: BrowserContext, extractor: Any, *, interval: float = 2.0
+) -> list[dict[str, Any]]:
+    """Wait for a verified Udemy session and return the cookies that passed verification."""
+    while True:
+        cookies = browser.filter_cookies("udemy", await ctx.cookies())
+        if _has_valid_auth_cookie("udemy", cookies) and (
+            await extractor.verify_session(cookies) is True
+        ):
+            return cookies
+        await asyncio.sleep(interval)
+
+
 async def _poll_login_redirect(page: Page, *, interval: float = 1.0) -> bool:
     """Detecta que el login terminó cuando la página sale de rutas de login."""
     login_paths = ("/login", "/users/sign_in", "/join/login-popup")
@@ -70,9 +83,9 @@ async def _poll_login_redirect(page: Page, *, interval: float = 1.0) -> bool:
 async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
     """Abre el navegador para que el usuario inicie sesión manualmente.
 
-    Detecta el login esperando a que aparezca el selector de sesión activa de la
-    plataforma O una cookie de sesión conocida, lo que ocurra primero. Entonces
-    persiste las cookies del contexto. Devuelve True si tuvo éxito.
+    Para Udemy espera una sesión confirmada por la API antes de guardar cookies.
+    En las demás plataformas detecta el selector, la redirección o una cookie
+    de sesión conocida. Devuelve True si tuvo éxito.
 
     El login se hace siempre en modo *no headless* porque requiere interacción
     humana (credenciales, posible 2FA/captcha).
@@ -84,6 +97,18 @@ async def login(platform: str, *, timeout_s: int = LOGIN_TIMEOUT_S) -> bool:
     async with browser.browser_context(headless=False, with_session=False) as ctx:
         page = await ctx.new_page()
         await page.goto(extractor.login_url)
+
+        if platform == "udemy":
+            try:
+                cookies = await asyncio.wait_for(
+                    _poll_verified_udemy_session(ctx, extractor), timeout=timeout_s
+                )
+            except TimeoutError:
+                console.print("[red]No se verificó el inicio de sesión a tiempo.[/red]")
+                return False
+            browser.save_cookies(cookies, platform)
+            console.print("[green]Sesión guardada correctamente.[/green]")
+            return True
 
         tasks = [
             asyncio.create_task(

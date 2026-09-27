@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from evdownloader import browser, session
 
 
@@ -160,7 +162,7 @@ def test_login_no_guarda_cookie_udemy_invalida(monkeypatch) -> None:
 
     monkeypatch.setattr(browser, "browser_context", lambda **kwargs: FakeContext())
 
-    assert asyncio.run(session.login("udemy", timeout_s=1)) is False
+    assert asyncio.run(session.login("udemy", timeout_s=0.02)) is False
     assert saved == []
 
 
@@ -212,6 +214,166 @@ def test_login_udemy_solo_guarda_cookies_de_udemy(monkeypatch) -> None:
 
     assert asyncio.run(session.login("udemy", timeout_s=1)) is True
     assert saved == [[{"name": "access_token", "value": "token", "domain": ".udemy.com"}]]
+
+
+def test_login_udemy_espera_verificacion_tras_redireccion_y_token_invitado(monkeypatch) -> None:
+    verified: list[str] = []
+
+    async def verify(cookies) -> bool:
+        token = next(cookie["value"] for cookie in cookies if cookie["name"] == "access_token")
+        verified.append(token)
+        return token == "authenticated"
+
+    monkeypatch.setattr(
+        session,
+        "get_extractor_by_name",
+        lambda platform: SimpleNamespace(
+            login_url="https://www.udemy.com/login",
+            auth_ready_selector=".logged-in",
+            verify_session=verify,
+        ),
+    )
+    poll = session._poll_verified_udemy_session
+
+    async def fast_poll(ctx, extractor):
+        return await poll(ctx, extractor, interval=0)
+
+    monkeypatch.setattr(session, "_poll_verified_udemy_session", fast_poll)
+    saved: list[list[dict[str, object]]] = []
+    monkeypatch.setattr(browser, "save_cookies", lambda cookies, platform: saved.append(cookies))
+
+    class FakePage:
+        url = "https://www.udemy.com/intermediate-login-step/"
+
+        async def goto(self, url: str) -> None:
+            pass
+
+        async def wait_for_selector(self, selector: str, timeout: int) -> None:
+            return None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            self.closed = True
+
+        async def new_page(self) -> FakePage:
+            return FakePage()
+
+        async def cookies(self) -> list[dict[str, object]]:
+            self.calls += 1
+            token = "guest" if self.calls == 1 else "authenticated"
+            return [{"name": "access_token", "value": token, "domain": ".udemy.com"}]
+
+    ctx = FakeContext()
+    monkeypatch.setattr(browser, "browser_context", lambda **kwargs: ctx)
+
+    assert asyncio.run(session.login("udemy", timeout_s=1)) is True
+    assert verified == ["guest", "authenticated"]
+    assert saved == [[{"name": "access_token", "value": "authenticated", "domain": ".udemy.com"}]]
+    assert ctx.closed is True
+
+
+def test_login_udemy_timeout_no_guarda_token_invitado(monkeypatch, capsys) -> None:
+    async def verify(cookies) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        session,
+        "get_extractor_by_name",
+        lambda platform: SimpleNamespace(
+            login_url="https://www.udemy.com/login",
+            auth_ready_selector=".logged-in",
+            verify_session=verify,
+        ),
+    )
+    saved: list[object] = []
+    monkeypatch.setattr(browser, "save_cookies", lambda cookies, platform: saved.append(cookies))
+
+    class FakePage:
+        url = "https://www.udemy.com/intermediate-login-step/"
+
+        async def goto(self, url: str) -> None:
+            pass
+
+        async def wait_for_selector(self, selector: str, timeout: int) -> None:
+            return None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            self.closed = True
+
+        async def new_page(self) -> FakePage:
+            return FakePage()
+
+        async def cookies(self) -> list[dict[str, object]]:
+            return [{"name": "access_token", "value": "guest", "domain": ".udemy.com"}]
+
+    ctx = FakeContext()
+    monkeypatch.setattr(browser, "browser_context", lambda **kwargs: ctx)
+
+    assert asyncio.run(session.login("udemy", timeout_s=0.02)) is False
+    assert saved == []
+    assert ctx.closed is True
+    assert "No se verificó el inicio de sesión a tiempo" in capsys.readouterr().out
+
+
+def test_login_udemy_cancelacion_cierra_contexto_sin_guardar(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session,
+        "get_extractor_by_name",
+        lambda platform: SimpleNamespace(login_url="https://www.udemy.com/login"),
+    )
+    saved: list[object] = []
+    monkeypatch.setattr(browser, "save_cookies", lambda cookies, platform: saved.append(cookies))
+    started = asyncio.Event()
+
+    class FakePage:
+        async def goto(self, url: str) -> None:
+            pass
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            self.closed = True
+
+        async def new_page(self) -> FakePage:
+            return FakePage()
+
+        async def cookies(self) -> list[dict[str, object]]:
+            started.set()
+            await asyncio.Future()
+            return []
+
+    ctx = FakeContext()
+    monkeypatch.setattr(browser, "browser_context", lambda **kwargs: ctx)
+
+    async def run() -> None:
+        task = asyncio.create_task(session.login("udemy", timeout_s=10))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert ctx.closed is True
+    assert saved == []
 
 
 def test_is_logged_in_platzi_no_acepta_cookie_generica_si_falla_selector(monkeypatch) -> None:
