@@ -48,6 +48,7 @@ from ..models import (
     DrmRefresher,
     Resource,
     ResourceKind,
+    Subtitle,
     Unit,
     UnitExtras,
     UnitType,
@@ -330,7 +331,8 @@ class UdemyExtractor(Extractor):
         return source
 
     async def _attach_drm(self, unit: Unit, source: VideoSource) -> None:
-        """Populate VideoSource.drm for DRM-protected Udemy lectures."""
+        """Attach verified captions and DRM metadata for opted-in Udemy lectures."""
+        source.subtitle_inventory_required = True
         if not unit.url:
             return
         if not self.url_policy.allows(unit.url):
@@ -346,6 +348,26 @@ class UdemyExtractor(Extractor):
         if asset is None:
             asset = await self._fetch_drm_asset(course_id, lecture_id)
             self._token_cache.put(course_id, lecture_id, asset)
+        captions = asset.get("captions")
+        if isinstance(captions, list):
+            tracks: list[Subtitle] = []
+            for caption in captions:
+                if not isinstance(caption, dict):
+                    break
+                lang = caption.get("locale_id")
+                url = caption.get("url")
+                if (
+                    not isinstance(lang, str)
+                    or re.fullmatch(r"[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{2,8})*", lang) is None
+                    or not isinstance(url, str)
+                    or not _UDEMY_MEDIA_POLICY.allows(url)
+                ):
+                    break
+                tracks.append(Subtitle(lang=lang, url=url))
+            else:
+                source.subtitles = tracks
+                source.subtitle_inventory_confirmed = True
+                source.write_subs = False
         if not asset.get("course_is_drmed"):
             return
 
@@ -420,7 +442,7 @@ class UdemyExtractor(Extractor):
         url = (
             f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/{course_id}"
             f"/lectures/{lecture_id}/?fields[lecture]=asset"
-            f"&fields[asset]=asset_type,course_is_drmed,media_license_token,media_sources"
+            f"&fields[asset]=asset_type,course_is_drmed,media_license_token,media_sources,captions"
         )
         try:
             if not self.url_policy.allows(url):
@@ -428,10 +450,16 @@ class UdemyExtractor(Extractor):
             resp = await self._rnet_client().get(
                 url, headers=self._api_headers(url), allow_redirects=False
             )
-            data = json.loads(await self._response_text(resp))
+            try:
+                if not 200 <= resp.status_code.as_int() < 300:
+                    return {}
+                data = json.loads(await resp.text())
+            finally:
+                with contextlib.suppress(Exception):
+                    await resp.close()
         except Exception:  # noqa: BLE001
             return {}
-        asset = data.get("asset")
+        asset = data.get("asset") if isinstance(data, dict) else None
         return asset if isinstance(asset, dict) else {}
 
     @staticmethod
@@ -454,12 +482,12 @@ class UdemyExtractor(Extractor):
         para bajarlas). No se captura MHTML (no hay navegador).
         """
         if not unit.url or not self._load_cookies():
-            return UnitExtras()
+            raise ValueError("Udemy lecture details require a valid session and lecture URL.")
         if not self.url_policy.allows(unit.url):
             raise ValueError("Udemy rechazó una URL de clase no confiable.")
         course_id, lecture_id = self._ids_from_url(unit.url)
         if not course_id or not lecture_id:
-            return UnitExtras()
+            raise ValueError("Udemy lecture details require valid course and lecture IDs.")
         details = await self._fetch_lecture_details(
             course_id, lecture_id, include_article=unit.type is UnitType.LECTURE
         )
@@ -553,9 +581,20 @@ class UdemyExtractor(Extractor):
                 status = resp.status_code.as_int()
                 if status in {301, 302, 303, 307, 308}:
                     location = resp.headers.get("location")
-                    if not isinstance(location, str) or not location or hop == _MAX_REDIRECTS:
+                    if isinstance(location, bytes):
+                        try:
+                            location_text = location.decode("ascii")
+                        except UnicodeDecodeError:
+                            return ""
+                        if any(ord(char) <= 0x20 or ord(char) == 0x7F for char in location_text):
+                            return ""
+                    elif isinstance(location, str):
+                        location_text = location
+                    else:
                         return ""
-                    current_url = urljoin(current_url, location)
+                    if not location_text or hop == _MAX_REDIRECTS:
+                        return ""
+                    current_url = urljoin(current_url, location_text)
                     continue
                 if not 200 <= status < 300:
                     return ""
@@ -610,14 +649,23 @@ class UdemyExtractor(Extractor):
         )
         try:
             if not self.url_policy.allows(url):
-                return {}
+                raise ValueError("Udemy lecture detail URL is not trusted.")
             resp = await self._rnet_client().get(
                 url, headers=self._api_headers(url), allow_redirects=False
             )
-            data = json.loads(await self._response_text(resp))
+            try:
+                status = resp.status_code.as_int()
+                if not 200 <= status < 300:
+                    raise ValueError("Udemy lecture detail request failed.")
+                data = json.loads(await resp.text())
+            finally:
+                with contextlib.suppress(Exception):
+                    await resp.close()
         except Exception:  # noqa: BLE001
-            return {}
-        return data if isinstance(data, dict) else {}
+            raise ValueError("Udemy lecture details could not be retrieved.") from None
+        if not isinstance(data, dict) or not isinstance(data.get("supplementary_assets"), list):
+            raise ValueError("Udemy lecture details have an invalid resource list.")
+        return data
 
     @staticmethod
     async def _response_text(response: Any) -> str:

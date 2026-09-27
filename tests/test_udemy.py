@@ -427,6 +427,8 @@ def _article_unit() -> Unit:
 @pytest.mark.asyncio
 async def test_resolve_extras_articulo_sin_suplementos_expone_body_y_cierra() -> None:
     response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = 200
     response.text.return_value = json.dumps(
         {
             "asset": {"asset_type": "Article", "body": "<p>Test reading</p>"},
@@ -451,6 +453,8 @@ async def test_resolve_extras_articulo_sin_suplementos_expone_body_y_cierra() ->
 @pytest.mark.asyncio
 async def test_resolve_extras_articulo_con_archivo_y_enlace_preserva_todo() -> None:
     response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = 200
     response.text.return_value = json.dumps(
         {
             "asset": {"asset_type": "Article", "body": "<p>Test reading</p>"},
@@ -488,16 +492,54 @@ async def test_resolve_extras_articulo_con_archivo_y_enlace_preserva_todo() -> N
 @pytest.mark.asyncio
 async def test_resolve_extras_cierra_respuesta_si_falla_lectura() -> None:
     response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = 200
     response.text.side_effect = RuntimeError("synthetic read failure")
     extractor = UdemyExtractor()
     client = AsyncMock()
     client.get.return_value = response
     extractor._client = client
 
-    extras = await extractor.resolve_extras(None, _article_unit())
+    with pytest.raises(ValueError, match="lecture details could not be retrieved"):
+        await extractor.resolve_extras(None, _article_unit())
 
-    assert extras.summary_html is None
-    assert extras.resources == []
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 302])
+async def test_lecture_detail_http_failure_is_not_an_empty_resource_list(status: int) -> None:
+    response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = status
+    response.text.return_value = "private response-body token=secret"
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="lecture details could not be retrieved") as error:
+        await extractor.resolve_extras(None, _article_unit())
+
+    assert "token=secret" not in str(error.value)
+    response.text.assert_not_awaited()
+    response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_lecture_detail_invalid_shape_is_not_an_empty_resource_list() -> None:
+    response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = 200
+    response.text.return_value = "{}"
+    extractor = UdemyExtractor()
+    client = AsyncMock()
+    client.get.return_value = response
+    extractor._client = client
+
+    with pytest.raises(ValueError, match="invalid resource list"):
+        await extractor.resolve_extras(None, _article_unit())
+
     response.close.assert_awaited_once_with()
 
 
@@ -558,6 +600,129 @@ def _mpd_xml() -> str:
     </ContentProtection>
   </AdaptationSet></Period>
 </MPD>"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("captions", "confirmed", "languages"),
+    [
+        (
+            [{"locale_id": "es_CO", "url": "https://udemycdn.com/sub.vtt?sig=synthetic"}],
+            True,
+            ["es_CO"],
+        ),
+        ([], True, []),
+        (None, False, []),
+        ({"locale_id": "es_CO"}, False, []),
+        ([{"locale_id": "bad/locale", "url": "https://udemycdn.com/sub.vtt"}], False, []),
+        ([{"locale_id": "es_CO", "url": "https://udemycdn.com.evil.test/sub.vtt"}], False, []),
+        ([{"locale_id": "es_CO", "url": "http://udemycdn.com/sub.vtt"}], False, []),
+        ([{"locale_id": "es_CO", "url": "https://udemycdn.com/sub.vtt"}, {}], False, []),
+    ],
+)
+async def test_drm_caption_inventory_requires_valid_tracks(
+    captions: object, confirmed: bool, languages: list[str]
+) -> None:
+    ex = UdemyExtractor()
+    ex.configure(Settings(use_drm=True))
+    asset = _drm_asset()
+    if captions is not None:
+        asset["captions"] = captions
+    ex._fetch_drm_asset = AsyncMock(return_value=asset)  # type: ignore[method-assign]
+    ex._fetch_text = AsyncMock(return_value=_mpd_xml())  # type: ignore[method-assign]
+    unit = Unit(
+        title="Lesson",
+        url=(
+            "https://www.udemy.com/course/learn/v4/t/lecture/1"
+            "#__youtubedl_smuggle=%7B%22course_id%22%3A+%2242%22%7D"
+        ),
+    )
+
+    source = await ex.resolve_video(None, unit)
+
+    assert source is not None and source.drm is not None
+    assert source.write_subs is False
+    assert source.subtitle_inventory_confirmed is confirmed
+    assert [track.lang for track in source.subtitles] == languages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("captions", "confirmed", "languages"),
+    [
+        ([{"locale_id": "es_CO", "url": "https://udemycdn.com/es.vtt"}], True, ["es_CO"]),
+        ([], True, []),
+        (None, False, []),
+        ([{"locale_id": "es_CO", "url": "https://evil.test/es.vtt"}], False, []),
+    ],
+)
+async def test_opted_in_non_drm_udemy_uses_verified_direct_captions(
+    captions: object, confirmed: bool, languages: list[str]
+) -> None:
+    ex = UdemyExtractor()
+    ex.configure(Settings(use_drm=True))
+    asset: dict[str, object] = {"course_is_drmed": False}
+    if captions is not None:
+        asset["captions"] = captions
+    ex._fetch_drm_asset = AsyncMock(return_value=asset)  # type: ignore[method-assign]
+    ex._fetch_text = AsyncMock()  # type: ignore[method-assign]
+    unit = Unit(
+        title="Lesson",
+        url=(
+            "https://www.udemy.com/course/learn/v4/t/lecture/1"
+            "#__youtubedl_smuggle=%7B%22course_id%22%3A+%2242%22%7D"
+        ),
+    )
+
+    source = await ex.resolve_video(None, unit)
+
+    assert source is not None
+    assert source.url == unit.url and source.is_embed is True and source.drm is None
+    assert source.subtitle_inventory_required is True
+    assert source.subtitle_inventory_confirmed is confirmed
+    assert source.write_subs is not confirmed
+    assert [track.lang for track in source.subtitles] == languages
+    ex._fetch_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body", [(403, "{}"), (200, "not-json"), (200, "[]")])
+async def test_drm_asset_failed_api_does_not_confirm_empty_captions(status: int, body: str) -> None:
+    response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = status
+    response.text.return_value = body
+    ex = UdemyExtractor()
+    ex._client = AsyncMock()
+    ex._client.get.return_value = response
+
+    assert await ex._fetch_drm_asset("42", "1") == {}
+    assert "captions" in ex._client.get.call_args.args[0]
+    response.close.assert_awaited_once()
+    if status != 200:
+        response.text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_drm_asset_requests_captions_with_authenticated_asset_fields() -> None:
+    response = AsyncMock()
+    response.status_code = MagicMock()
+    response.status_code.as_int.return_value = 200
+    response.text.return_value = json.dumps(
+        {"asset": {"captions": [{"locale_id": "es_CO", "url": "https://udemycdn.com/es.vtt"}]}}
+    )
+    ex = UdemyExtractor()
+    ex._client = AsyncMock()
+    ex._client.get.return_value = response
+
+    asset = await ex._fetch_drm_asset("42", "1")
+
+    assert asset["captions"][0]["locale_id"] == "es_CO"
+    request_url = ex._client.get.call_args.args[0]
+    assert "fields[lecture]=asset" in request_url
+    assert "media_sources,captions" in request_url
+    assert ex._client.get.call_args.kwargs["allow_redirects"] is False
+    response.close.assert_awaited_once()
 
 
 def test_cache_reuses_valid_token() -> None:

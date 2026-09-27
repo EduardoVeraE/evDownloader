@@ -22,6 +22,8 @@ from evdownloader.models import (
     VideoSource,
 )
 from evdownloader.service import (
+    DownloadOutcome,
+    UnitOutcome,
     _download_files,
     _download_video,
     _load_structure,
@@ -62,7 +64,10 @@ async def test_download_course_fetches_fresh_structure_by_default(tmp_path: Path
     with (
         patch("evdownloader.service.get_extractor", return_value=extractor),
         patch("evdownloader.service.get_downloader", return_value=downloader),
-        patch("evdownloader.service._run_download", new=AsyncMock()) as run_download,
+        patch(
+            "evdownloader.service._run_download",
+            new=AsyncMock(return_value=DownloadOutcome()),
+        ) as run_download,
     ):
         await download_course("https://example.test/course", Settings(download_dir=tmp_path))
 
@@ -187,7 +192,9 @@ async def test_limit_counts_videos_and_stops_after_nth_video(tmp_path: Path) -> 
 
     with (
         patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
-        patch("evdownloader.service._process_unit", new=AsyncMock()) as process_unit,
+        patch(
+            "evdownloader.service._process_unit", new=AsyncMock(return_value=UnitOutcome())
+        ) as process_unit,
     ):
         await _run_download(
             extractor,
@@ -380,7 +387,9 @@ async def test_dotted_base_service_extras_append_suffixes(tmp_path: Path) -> Non
         )
     )
 
-    with patch("evdownloader.service._download_files", new_callable=AsyncMock) as download_files:
+    with patch(
+        "evdownloader.service._download_files", new=AsyncMock(return_value=0)
+    ) as download_files:
         await _save_extras(extractor, None, unit, base, Settings(download_dir=tmp_path))
 
     assert (tmp_path / "01-Node.js.resumen.html").exists()
@@ -935,11 +944,264 @@ async def test_direct_source_without_captured_tracks_does_not_claim_complete(
     downloader = MagicMock()
     downloader.download = AsyncMock(return_value=media)
 
-    await _download_video(
+    result = await _download_video(
         extractor, downloader, None, _unit(), base, Settings(download_dir=tmp_path)
     )
 
+    assert result == (True, False)
     assert _manifest(base) == {"version": 1, "complete": False, "files": []}
+
+
+@pytest.mark.asyncio
+async def test_no_subtitle_source_reports_incomplete_course_after_media_and_extras(
+    tmp_path: Path, output: StringIO
+) -> None:
+    url = "https://example.test/course"
+    course = Course(
+        title="Course",
+        url=url,
+        chapters=[Chapter(title="Chapter", index=1, units=[_unit()])],
+    )
+    extractor = MagicMock(needs_browser=False)
+    extractor.name = "test"
+    extractor.resolve_video = AsyncMock(
+        return_value=VideoSource(url="https://example.test/media", write_subs=False)
+    )
+    extractor.resolve_extras = AsyncMock(return_value=UnitExtras())
+    downloader = MagicMock()
+    downloader.download = AsyncMock(return_value=tmp_path / "lesson.mp4")
+
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=downloader),
+        patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
+        pytest.raises(RuntimeError, match="videos=0, extras=0, resources=0, subtitles=1"),
+    ):
+        await download_course(url, Settings(download_dir=tmp_path))
+
+    downloader.download.assert_awaited_once()
+    extractor.resolve_extras.assert_awaited_once()
+    assert "Subtítulos incompletos: estado incompleto" in output.getvalue()
+    assert "Download incomplete:" in output.getvalue()
+    assert "Descarga finalizada" not in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_drm_caption_recovery_uses_existing_mp4_and_reports_failed_track(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "lesson"
+    media = tmp_path / "lesson.mp4"
+    media.write_bytes(b"existing-media")
+    source = VideoSource(
+        url="https://udemycdn.com/media.mpd",
+        trusted_host_suffixes=("udemy.com", "udemycdn.com"),
+        subtitle_inventory_confirmed=True,
+        subtitles=[Subtitle(lang="es_CO", url="https://udemycdn.com/sub.vtt?sig=synthetic")],
+    )
+    extractor = MagicMock()
+    extractor.resolve_video = AsyncMock(return_value=source)
+    downloader = MagicMock()
+    downloader.download = AsyncMock()
+    response = _response()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+
+    with patch("evdownloader.service.rnet.Client", return_value=client):
+        assert await _download_video(
+            extractor, downloader, None, _unit(), base, Settings(download_dir=tmp_path)
+        ) == (True, True)
+    downloader.download.assert_not_awaited()
+    assert media.read_bytes() == b"existing-media"
+    assert (tmp_path / "lesson.es_CO.vtt").read_text(encoding="utf-8") == "WEBVTT\n"
+    assert _manifest(base)["complete"] is True
+
+    (tmp_path / "lesson.es_CO.vtt").unlink()
+    client.get = AsyncMock(side_effect=RuntimeError("signed URL token=secret"))
+    with patch("evdownloader.service.rnet.Client", return_value=client):
+        assert await _download_video(
+            extractor, downloader, None, _unit(), base, Settings(download_dir=tmp_path)
+        ) == (True, False)
+    downloader.download.assert_not_awaited()
+    assert media.read_bytes() == b"existing-media"
+    assert _manifest(base)["complete"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed,expected", [(True, True), (False, False)])
+async def test_existing_mp4_zero_captions_requires_confirmed_inventory(
+    tmp_path: Path, confirmed: bool, expected: bool
+) -> None:
+    base = tmp_path / "lesson"
+    (tmp_path / "lesson.mp4").write_bytes(b"existing-media")
+    extractor = MagicMock()
+    extractor.resolve_video = AsyncMock(
+        return_value=VideoSource(
+            url="https://udemycdn.com/media.mpd", subtitle_inventory_confirmed=confirmed
+        )
+    )
+    downloader = MagicMock()
+    downloader.download = AsyncMock()
+
+    assert await _download_video(
+        extractor, downloader, None, _unit(), base, Settings(download_dir=tmp_path)
+    ) == (True, expected)
+    assert _manifest(base) == {"version": 1, "complete": expected, "files": []}
+    downloader.download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("captions", [True, False])
+async def test_opted_in_udemy_rechecks_legacy_empty_manifest_without_media_download(
+    tmp_path: Path, captions: bool
+) -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    base = tmp_path / "lesson"
+    media = tmp_path / "lesson.mp4"
+    media.write_bytes(b"existing-media")
+    _write_manifest(base, {"version": 1, "complete": True, "files": []})
+    subtitles = [Subtitle(lang="es_CO", url="https://udemycdn.com/es.vtt")] if captions else []
+    source = VideoSource(
+        url="https://www.udemy.com/course/learn/v4/t/lecture/1",
+        trusted_host_suffixes=("udemy.com", "udemycdn.com"),
+        subtitle_inventory_required=True,
+        subtitle_inventory_confirmed=True,
+        subtitles=subtitles,
+    )
+    extractor = UdemyExtractor()
+    extractor.resolve_video = AsyncMock(return_value=source)  # type: ignore[method-assign]
+    downloader = MagicMock()
+    downloader.download = AsyncMock()
+    downloader.download_subtitles = AsyncMock()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_response())
+
+    with patch("evdownloader.service.rnet.Client", return_value=client):
+        assert await _download_video(
+            extractor,
+            downloader,
+            None,
+            _unit(),
+            base,
+            Settings(download_dir=tmp_path, use_drm=True),
+        ) == (True, True)
+
+    extractor.resolve_video.assert_awaited_once()
+    downloader.download.assert_not_awaited()
+    downloader.download_subtitles.assert_not_awaited()
+    assert media.read_bytes() == b"existing-media"
+    assert _manifest(base) == {
+        "version": 1,
+        "complete": True,
+        "files": ["lesson.es_CO.vtt"] if captions else [],
+    }
+    assert client.get.await_count == int(captions)
+
+
+@pytest.mark.asyncio
+async def test_non_drm_udemy_legacy_manifest_recovers_from_asset_captions(
+    tmp_path: Path,
+) -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    base = tmp_path / "lesson"
+    media = tmp_path / "lesson.mp4"
+    media.write_bytes(b"existing-media")
+    _write_manifest(base, {"version": 1, "complete": True, "files": []})
+    unit = Unit(
+        title="Lesson",
+        url=(
+            "https://www.udemy.com/course/learn/v4/t/lecture/1"
+            "#__youtubedl_smuggle=%7B%22course_id%22%3A+%2242%22%7D"
+        ),
+    )
+    extractor = UdemyExtractor()
+    extractor.configure(Settings(use_drm=True))
+    extractor._cookies = [{"name": "session", "value": "synthetic", "domain": ".udemy.com"}]
+    extractor._cookies_loaded = True
+    extractor._fetch_drm_asset = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "course_is_drmed": False,
+            "captions": [{"locale_id": "es_CO", "url": "https://udemycdn.com/es.vtt"}],
+        }
+    )
+    downloader = MagicMock()
+    downloader.download = AsyncMock()
+    downloader.download_subtitles = AsyncMock()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_response())
+
+    with patch("evdownloader.service.rnet.Client", return_value=client):
+        result = await _download_video(
+            extractor, downloader, None, unit, base, Settings(download_dir=tmp_path, use_drm=True)
+        )
+
+    assert result == (True, True)
+    extractor._fetch_drm_asset.assert_awaited_once_with("42", "1")
+    downloader.download.assert_not_awaited()
+    downloader.download_subtitles.assert_not_awaited()
+    assert media.read_bytes() == b"existing-media"
+    assert (tmp_path / "lesson.es_CO.vtt").read_text(encoding="utf-8") == "WEBVTT\n"
+    assert _manifest(base) == {"version": 1, "complete": True, "files": ["lesson.es_CO.vtt"]}
+
+
+@pytest.mark.asyncio
+async def test_opted_in_udemy_unknown_inventory_stays_incomplete_with_managed_fallback(
+    tmp_path: Path,
+) -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    base = tmp_path / "lesson"
+    (tmp_path / "lesson.mp4").write_bytes(b"existing-media")
+    _write_manifest(base, {"version": 1, "complete": True, "files": []})
+    extractor = UdemyExtractor()
+    source = VideoSource(
+        url="https://www.udemy.com/course/learn/v4/t/lecture/1",
+        write_subs=True,
+        subtitle_inventory_required=True,
+    )
+    extractor.resolve_video = AsyncMock(return_value=source)  # type: ignore[method-assign]
+    downloader = MagicMock()
+    downloader.supports_managed_subtitles = True
+    downloader.download_subtitles = AsyncMock(return_value=[])
+    downloader.download = AsyncMock()
+
+    assert await _download_video(
+        extractor,
+        downloader,
+        None,
+        _unit(),
+        base,
+        Settings(download_dir=tmp_path, use_drm=True),
+    ) == (True, False)
+    downloader.download.assert_not_awaited()
+    downloader.download_subtitles.assert_awaited_once()
+    assert _manifest(base) == {"version": 1, "complete": False, "files": []}
+
+
+@pytest.mark.asyncio
+async def test_other_provider_keeps_complete_empty_manifest_fast_path_in_drm_mode(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "lesson"
+    (tmp_path / "lesson.mp4").write_bytes(b"existing-media")
+    _write_manifest(base, {"version": 1, "complete": True, "files": []})
+    extractor = MagicMock()
+    extractor.resolve_video = AsyncMock()
+    downloader = MagicMock()
+    downloader.download = AsyncMock()
+
+    assert await _download_video(
+        extractor,
+        downloader,
+        None,
+        _unit(),
+        base,
+        Settings(download_dir=tmp_path, use_drm=True),
+    ) == (True, True)
+    extractor.resolve_video.assert_not_awaited()
+    downloader.download.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -998,3 +1260,132 @@ async def test_resource_download_uses_extractor_policy(tmp_path: Path) -> None:
 
     assert download.await_args.kwargs["cookie_jar"] == []
     assert download.await_args.kwargs["trusted_host_suffixes"] == ("example.test",)
+
+
+@pytest.mark.asyncio
+async def test_failed_video_still_fetches_extras_and_fails_at_end(
+    tmp_path: Path, output: StringIO
+) -> None:
+    url = "https://example.test/course"
+    course = Course(
+        title="Course",
+        url=url,
+        chapters=[Chapter(title="Chapter", index=1, units=[_unit(), _unit()])],
+    )
+    extractor = MagicMock(needs_browser=False)
+    extractor.name = "test"
+    extractor.resolve_video = AsyncMock(return_value=VideoSource(url="https://example.test/video"))
+    extractor.resolve_extras = AsyncMock(return_value=UnitExtras(summary_html="<p>Extra</p>"))
+    downloader = MagicMock()
+    downloader.download = AsyncMock(
+        side_effect=RuntimeError("https://signed.example.test/video?token=secret Cookie: private")
+    )
+
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=downloader),
+        patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
+        pytest.raises(RuntimeError, match="videos=2, extras=0, resources=0"),
+    ):
+        await download_course(url, Settings(download_dir=tmp_path))
+
+    assert extractor.resolve_extras.await_count == 2
+    assert "Descarga finalizada" not in output.getvalue()
+    assert "token=secret" not in output.getvalue()
+    assert "Cookie:" not in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_resource_failures_are_counted_without_stopping_remaining_files(
+    tmp_path: Path, output: StringIO
+) -> None:
+    resources = [
+        Resource(
+            title=f"notes-{index}.pdf",
+            url=f"https://example.test/{index}",
+            kind=ResourceKind.FILE,
+        )
+        for index in range(2)
+    ]
+    with patch("evdownloader.service.download_resource", new_callable=AsyncMock) as download:
+        download.side_effect = [
+            RuntimeError("signed-url?token=secret"),
+            MagicMock(ok=False, reason="http_status", error_name=None),
+        ]
+        failures = await _download_files(resources, tmp_path, [], ("example.test",))
+
+    assert failures == 2
+    assert download.await_count == 2
+    assert "token=secret" not in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_extras_failure_is_reported_after_later_units(
+    tmp_path: Path, output: StringIO
+) -> None:
+    url = "https://example.test/course"
+    articles = [
+        Unit(
+            title=f"Reading {index}",
+            url=f"https://example.test/{index}",
+            index=index,
+            type=UnitType.LECTURE,
+        )
+        for index in (1, 2)
+    ]
+    course = Course(
+        title="Course", url=url, chapters=[Chapter(title="Chapter", index=1, units=articles)]
+    )
+    extractor = MagicMock(needs_browser=False)
+    extractor.name = "test"
+    extractor.resolve_extras = AsyncMock(
+        side_effect=[ValueError("response-body token=secret"), UnitExtras()]
+    )
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=MagicMock()),
+        patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
+        pytest.raises(RuntimeError, match="extras=1"),
+    ):
+        await download_course(url, Settings(download_dir=tmp_path))
+
+    assert extractor.resolve_extras.await_count == 2
+    assert "token=secret" not in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_failed_resource_makes_course_incomplete(tmp_path: Path, output: StringIO) -> None:
+    url = "https://example.test/course"
+    course = Course(
+        title="Course",
+        url=url,
+        chapters=[
+            Chapter(
+                title="Chapter",
+                index=1,
+                units=[Unit(title="Reading", url=url, type=UnitType.LECTURE, index=1)],
+            )
+        ],
+    )
+    extractor = MagicMock(needs_browser=False)
+    extractor.name = "test"
+    extractor.resource_host_suffixes = ("example.test",)
+    extractor.resolve_extras = AsyncMock(
+        return_value=UnitExtras(
+            resources=[Resource(title="notes.pdf", url=url, kind=ResourceKind.FILE)]
+        )
+    )
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=MagicMock()),
+        patch("evdownloader.service._load_structure", new=AsyncMock(return_value=course)),
+        patch("evdownloader.service.download_resource", new_callable=AsyncMock) as download,
+        pytest.raises(RuntimeError, match="resources=1"),
+    ):
+        download.return_value.ok = False
+        download.return_value.reason = "http_status"
+        download.return_value.error_name = None
+        await download_course(url, Settings(download_dir=tmp_path))
+
+    assert download.await_count == 1
+    assert "Descarga finalizada" not in output.getvalue()

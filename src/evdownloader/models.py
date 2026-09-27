@@ -102,6 +102,10 @@ class VideoSource(BaseModel):
     # subtitle boundaries fail closed when this is empty.
     trusted_host_suffixes: tuple[str, ...] = ()
     subtitles: list[Subtitle] = Field(default_factory=list)
+    # True only when the provider explicitly confirmed the subtitle inventory.
+    subtitle_inventory_confirmed: bool = False
+    # An inventory lookup was required; managed subtitle fallback cannot confirm it.
+    subtitle_inventory_required: bool = False
     # Si el downloader (yt-dlp) debe extraer los subtítulos junto con el video.
     # Lo usan los extractores que delegan la resolución en yt-dlp (Udemy); los
     # que traen las URLs de subtítulos aparte (Platzi) lo dejan en False.

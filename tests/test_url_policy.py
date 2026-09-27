@@ -203,7 +203,9 @@ def test_cookiefile_filter_rejects_expired_malformed_and_cross_boundary_records(
 
 
 class _Response:
-    def __init__(self, status: int, *, location: str | None = None, text: str = "body") -> None:
+    def __init__(
+        self, status: int, *, location: str | bytes | None = None, text: str = "body"
+    ) -> None:
         self.status_code = SimpleNamespace(
             as_int=lambda: status, is_success=lambda: 200 <= status < 300
         )
@@ -235,6 +237,61 @@ async def test_udemy_authenticated_redirect_stops_before_untrusted_host() -> Non
     assert await extractor._fetch_text("https://www.udemy.com/course/start") == ""
     assert client.get.await_count == 1
     response.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("location", "destination", "cookie_expected"),
+    [
+        (b"/course/final", "https://www.udemy.com/course/final", True),
+        (b"https://cdn.udemycdn.com/course/final", "https://cdn.udemycdn.com/course/final", False),
+    ],
+)
+async def test_udemy_byte_redirect_resolves_course_id_with_scoped_cookies(
+    location: bytes, destination: str, cookie_expected: bool
+) -> None:
+    redirect = _Response(301, location=location)
+    final = _Response(200, text='"courseId":6905411')
+    extractor = UdemyExtractor()
+    extractor._load_cookies = MagicMock(  # type: ignore[method-assign]
+        return_value=[{"name": "session", "value": "synthetic", "domain": ".udemy.com"}]
+    )
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[redirect, final])
+    extractor._client = client
+
+    assert await extractor._resolve_course_id("https://www.udemy.com/course/start") == "6905411"
+    assert [call.args[0] for call in client.get.await_args_list] == [
+        "https://www.udemy.com/course/start",
+        destination,
+    ]
+    assert all(call.kwargs["allow_redirects"] is False for call in client.get.await_args_list)
+    assert "Cookie" in client.get.await_args_list[0].kwargs["headers"]
+    assert ("Cookie" in client.get.await_args_list[1].kwargs["headers"]) is cookie_expected
+    redirect.close.assert_awaited_once_with()
+    final.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location",
+    [
+        b"https://evil.test/final",
+        b"/course/\xff",
+        b"/course/\r\nfinal",
+        b"https://www.udemy.com:0/course/final",
+    ],
+)
+async def test_udemy_unsafe_byte_redirect_stops_before_follow_up(location: bytes) -> None:
+    redirect = _Response(301, location=location)
+    extractor = UdemyExtractor()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=redirect)
+    extractor._client = client
+
+    assert await extractor._fetch_text("https://www.udemy.com/course/start") == ""
+    assert client.get.await_count == 1
+    redirect.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
