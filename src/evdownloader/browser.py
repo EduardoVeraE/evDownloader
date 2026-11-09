@@ -25,11 +25,13 @@ from .models import Cookie
 from .url_policy import hostname_matches, normalize_hostname, parse_url_authority
 
 _SESSION_COOKIE_NAMES: dict[str, frozenset[str]] = {
+    "linkedin": frozenset({"li_at"}),
     "udemy": frozenset({"access_token"}),
     "codigofacilito": frozenset({"_session_id", "_codigofacilito_session"}),
     "sharepoint": frozenset({"FedAuth", "rtFa"}),
 }
 _PLATFORM_COOKIE_SUFFIXES = {
+    "linkedin": ("linkedin.com",),
     "udemy": ("udemy.com",),
     "platzi": ("platzi.com",),
     "codigofacilito": ("codigofacilito.com",),
@@ -126,12 +128,30 @@ def has_usable_session(platform: str, cookies: Sequence[Mapping[str, Any]]) -> b
     )
 
 
+def _parse_browser_spec(browser_spec: str) -> tuple[str, str | None]:
+    """Parse the supported ``BROWSER[:PROFILE]`` cookie specification."""
+    normalized = browser_spec.strip()
+    if not normalized or normalized.count(":") > 1:
+        raise ValueError("Invalid browser specification; expected BROWSER or BROWSER:PROFILE.")
+
+    browser_name, separator, profile = normalized.partition(":")
+    browser_name = browser_name.strip()
+    profile = profile.strip()
+    if not browser_name or "+" in browser_name or (separator and not profile):
+        raise ValueError("Invalid browser specification; expected BROWSER or BROWSER:PROFILE.")
+    return browser_name, profile if separator else None
+
+
 def load_browser_cookies(browser_name: str) -> list[dict[str, Any]]:
     """Extrae cookies del navegador configurado sin devolver errores sensibles."""
+    browser_name, profile = _parse_browser_spec(browser_name)
     try:
         from yt_dlp.cookies import extract_cookies_from_browser
 
-        jar = extract_cookies_from_browser(browser_name)
+        if profile is None:
+            jar = extract_cookies_from_browser(browser_name)
+        else:
+            jar = extract_cookies_from_browser(browser_name, profile=profile)
     except Exception:
         raise ValueError(
             f"No se pudieron leer las cookies de {browser_name}. "

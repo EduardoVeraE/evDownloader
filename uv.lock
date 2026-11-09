@@ -146,7 +146,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/b6/2c/66bab4fef920ef8ca
 
 [[package]]
 name = "evdownloader"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

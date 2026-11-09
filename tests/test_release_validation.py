@@ -19,7 +19,7 @@ def test_wheel_rejects_duplicate_members_before_content_validation(tmp_path: Pat
         archive.writestr("duplicate.txt", b"second")
 
     with pytest.raises(ValueError, match="duplicate.whl contains duplicate paths"):
-        verify_release._verify_wheel(wheel, "evdownloader", "0.1.3")
+        verify_release._verify_wheel(wheel, *verify_release._project())
 
 
 def test_sdist_rejects_duplicate_members_before_content_validation(tmp_path: Path) -> None:
@@ -31,4 +31,4 @@ def test_sdist_rejects_duplicate_members_before_content_validation(tmp_path: Pat
             archive.addfile(member, io.BytesIO(payload))
 
     with pytest.raises(ValueError, match="duplicate.tar.gz contains duplicate paths"):
-        verify_release._verify_sdist(sdist, "evdownloader", "0.1.3")
+        verify_release._verify_sdist(sdist, *verify_release._project())

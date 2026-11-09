@@ -5,11 +5,40 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from evdownloader import browser
 from evdownloader.models import Cookie
+
+
+def test_load_browser_cookies_preserves_browser_only_call() -> None:
+    with patch("yt_dlp.cookies.extract_cookies_from_browser", return_value=[]) as extract:
+        assert browser.load_browser_cookies("firefox") == []
+
+    extract.assert_called_once_with("firefox")
+
+
+def test_load_browser_cookies_passes_explicit_profile_separately() -> None:
+    with patch("yt_dlp.cookies.extract_cookies_from_browser", return_value=[]) as extract:
+        assert browser.load_browser_cookies("firefox:developer-profile") == []
+
+    extract.assert_called_once_with("firefox", profile="developer-profile")
+
+
+@pytest.mark.parametrize(
+    "browser_spec",
+    ["", ":developer-profile", "firefox:", "firefox:profile:container", "chrome+keyring"],
+)
+def test_load_browser_cookies_rejects_ambiguous_specifications(browser_spec: str) -> None:
+    with (
+        patch("yt_dlp.cookies.extract_cookies_from_browser") as extract,
+        pytest.raises(ValueError, match="Invalid browser specification"),
+    ):
+        browser.load_browser_cookies(browser_spec)
+
+    extract.assert_not_called()
 
 
 def test_cookie_header_matches_leading_dot_domain_exact_and_subdomain() -> None:

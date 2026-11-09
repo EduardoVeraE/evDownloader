@@ -340,6 +340,7 @@ class PlatziExtractor(Extractor):
             summary_html=raw.get("summaryHtml") or None,
             resources=resources,
             page_mhtml=mhtml,
+            page_capture_failed=capture_page and not mhtml,
         )
 
     @staticmethod

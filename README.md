@@ -12,13 +12,14 @@ Cada plataforma se autentica de una de dos formas, según su anti-bot:
 | Plataforma | Autenticación | Cómo |
 |---|---|---|
 | **Platzi** | Login manual asistido | `login` abre un navegador (Playwright) para que inicies sesión una vez; las cookies quedan guardadas |
-| **Udemy** | Sesión persistida o cookies del navegador real | Está tras Cloudflare Turnstile; usa la sesión guardada por `login` o `--cookies-from-browser` |
+| **Udemy** | Login manual o cookies del navegador | `evd login udemy` guarda una sesión verificada; `--cookies-from-browser` permite usar cookies del navegador |
 | **Codigofacilito** | Cookies del navegador real | Video servido por BunnyCDN; se resuelve con yt-dlp y `--cookies-from-browser` |
 | **SharePoint** | Cookies de Chrome o Edge | Requiere una URL de folder HTTPS y enumera grabaciones mediante SharePoint REST |
 
-> Para **Udemy** puedes usar una sesión guardada con `evd login udemy` o leer las
-> cookies de un navegador real (Brave, Chrome, Safari, Edge o Firefox). Para
-> Codigofacilito se recomienda `--cookies-from-browser`.
+> Para **Udemy**, si indicas `--cookies-from-browser`, sus cookies tienen prioridad
+> cuando contienen una sesión localmente utilizable; de lo contrario, se intenta
+> usar la sesión guardada. Esto no garantiza acceso al curso. Para Codigofacilito
+> se recomienda `--cookies-from-browser`.
 > SharePoint v1 solo acepta `--cookies-from-browser chrome` o `edge`; las cookies
 > se limitan a `*.sharepoint.com` y nunca se envían a redirects externos.
 
@@ -36,6 +37,8 @@ pipx install evDownloader
 ```
 
 Esto deja disponibles los comandos `evdownloader` y su alias corto `evd`.
+En un entorno local del proyecto, `.venv/bin/evd` es una alternativa opcional
+al `evd` instalado (macOS/Linux); no es necesario para la instalación como herramienta.
 
 Si estás trabajando desde el código fuente, puedes instalar la aplicación y
 todas sus dependencias Python con `reqs.txt`:
@@ -152,13 +155,16 @@ Sigue estos pasos antes de usar `evdownloader`:
    El archivo `.wvd` es un dispositivo Widevine sensible. Usa únicamente un
    dispositivo autorizado y no lo subas al repositorio.
 
-4. **Solo si vas a usar Platzi**, instala Chromium de Playwright una vez:
+4. **Si vas a usar el login manual de Platzi o Udemy**, instala Chromium de
+   Playwright una vez:
 
    ```bash
    evdownloader setup
    ```
 
-    Udemy, Codigofacilito y SharePoint no necesitan Chromium de Playwright.
+   La descarga de Udemy no abre Playwright; `evd login udemy` sí lo necesita.
+   Codigofacilito y SharePoint pueden descargar con cookies del navegador
+   sin este paso.
 
 ## Uso por plataforma
 
@@ -175,30 +181,50 @@ evdownloader download "https://platzi.com/cursos/<curso>/"
 ### Udemy
 
 ```bash
-# Requiere estar logueado en el navegador (ej. Brave) y pasar --cookies-from-browser
-evdownloader download \
-  "https://www.udemy.com/course/<curso>/" \
-  --cookies-from-browser brave
+# Instala Chromium de Playwright con `evd setup` si aún no lo hiciste.
+evd login udemy
+evd download "https://www.udemy.com/course/<curso>/"
 ```
 
-#### Udemy con DRM
+El login abre Chromium para la autenticación manual (hasta 180 segundos). Solo
+guarda las cookies cuando la API `/users/me/` confirma un usuario autenticado;
+una cookie de invitado o una redirección por sí solas no son suficientes.
 
-Si el archivo está en `vendors/` y ejecutas el
+Si el login de Playwright no funciona, inicia sesión en Firefox Developer Edition
+y prueba las cookies del perfil de Firefox usado más recientemente:
+
+```bash
+evd download "https://www.udemy.com/course/<curso>/" \
+  --cookies-from-browser firefox
+```
+
+La aplicación acepta el nombre del navegador, pero no una ruta a un perfil de
+Firefox con esta opción. Si se indica el navegador y sus cookies son localmente
+utilizables, prevalecen sobre la sesión guardada; si no, se usa la sesión
+guardada cuando sea utilizable. La disponibilidad local de cookies no confirma
+que tengas acceso al curso.
+
+#### Udemy con DRM (solo contenido autorizado)
+
+Si tienes un dispositivo Widevine autorizado en `vendors/` y ejecutas el
 comando desde la raíz del proyecto:
 
 ```bash
 evd download \
   "https://www.udemy.com/course/<curso>/" \
-  --cookies-from-browser brave \
   --use-drm \
-  --drm-device "$PWD/vendors/udemy_l3.wvd" \
+  --drm-device vendors/udemy_l3.wvd \
   --output ./downloads
 ```
 
-`--drm-device` acepta cualquier ruta absoluta o relativa a un `.wvd` válido.
-`--use-drm` es obligatorio para activar el descifrado; si falta el dispositivo o
-`mp4decrypt`, la ejecución termina con un error explícito. El resultado final es
-el MP4 desencriptado dentro de `downloads/Udemy/<curso>/...`.
+`--use-drm` activa el flujo DRM cuando se detecta contenido protegido. Con
+`--use-drm`, `--drm-device` debe apuntar a un archivo regular existente; en
+Udemy también es obligatorio indicar el dispositivo. Una ruta inexistente o
+inválida falla antes de procesar el curso o leer cookies, con una sola línea de
+error que no muestra la ruta. El dispositivo, `mp4decrypt`, la sesión y las
+licencias necesarias deben estar disponibles; no se garantiza descifrar todos
+los videos. No pegues ni incluyas archivos `.wvd`, cookies o tokens en Git,
+incidencias o registros compartidos.
 
 Límite de confianza DRM: `--drm-license-server` acepta una autoridad HTTPS
 externa elegida explícitamente, pero no reenvía cookies, headers ni tokens del
@@ -206,8 +232,11 @@ proveedor fuera de sus dominios de confianza. Para autenticar ese servidor
 externo debes proporcionar también su token explícito con `--drm-token`; los
 redirects del POST de licencia no se siguen.
 
-Limitación conocida: el flujo DRM actual puede no generar archivos VTT/SRT, esta
-en curso la investigación.
+Cuando hay pistas disponibles, se intentan guardar subtítulos WEBVTT junto a
+los videos; también pueden descargarse adjuntos, resúmenes y enlaces. No todos
+los cursos o unidades proporcionan los mismos materiales. `--no-resources`
+omite los recursos complementarios; `--sub-langs` filtra idiomas para los
+subtítulos gestionados por yt-dlp.
 
 ### Codigofacilito
 
@@ -239,7 +268,8 @@ contenedor cifrado, pero evDownloader informa claramente la limitación y no
 afirma haberlo convertido en un MP4 limpio.
 
 ## Ejemplos
- Usa el comando `evdownload` o su alias `evd`
+
+Usa `evdownloader` o su alias `evd`:
 
 ```bash
 # Platzi, calidad máxima 1080p, en un directorio concreto
@@ -252,11 +282,6 @@ evd download "https://codigofacilito.com/cursos/git-profesional" \
 # Udemy, sin descargar recursos/adjuntos y forzando re-descarga
 evd download "https://www.udemy.com/course/<curso>/" \
   --cookies-from-browser brave --no-resources --overwrite
-
-# Udemy protegido por DRM, con el dispositivo Widevine del proyecto
-evd download "https://www.udemy.com/course/<curso>/" \
-  --cookies-from-browser brave --use-drm \
-  --drm-device "$PWD/vendors/udemy_l3.wvd"
 
 # Solo subtítulos en español e inglés (plataformas que delegan subs en yt-dlp)
 evd download "<url>" --cookies-from-browser brave --sub-langs es,en
@@ -276,11 +301,11 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 | `-n`, `--limit` | Descargar solo las primeras N clases de video |
 | `--cache` | Usar la estructura guardada en caché (por defecto se obtiene una estructura nueva) |
 | `--no-resources` | No descargar resumen, adjuntos, enlaces ni MHTML |
-| `--cookies-from-browser` | Navegador del que leer cookies (`brave`, `chrome`, `safari`…). Fallback para Udemy; requerido si no hay sesión persistida |
+| `--cookies-from-browser` | Navegador del que leer cookies (`firefox`, `brave`, `chrome`…); en Udemy, cookies utilizables del navegador tienen prioridad sobre la sesión guardada |
 | `--sub-langs` | Idiomas de subtítulos (yt-dlp): `all`, `es,en`, `es.*`… |
 | `--show-browser` | Mostrar el navegador (no headless) — solo Platzi |
 | `--use-drm` | Activar el flujo integrado de detección, descifrado y validación DRM |
-| `--drm-device` | Ruta al dispositivo Widevine `.wvd`; requerido junto con `--use-drm` |
+| `--drm-device` | Ruta a un archivo regular `.wvd` existente; obligatorio para Udemy con `--use-drm` |
 | `--drm-license-server` | Autoridad HTTPS explícita para licencias; no recibe credenciales del proveedor si es externa |
 | `--drm-token` | Token explícito para el servidor DRM seleccionado; uso avanzado |
 
@@ -289,26 +314,39 @@ evdownloader download "https://platzi.com/cursos/<curso>/" --show-browser
 ```bash
 evdownloader --version      # muestra la versión instalada
 evdownloader --update       # busca y actualiza desde PyPI si hay una versión nueva
-evdownloader setup          # instala Chromium de Playwright (solo Platzi)
-evdownloader status         # ¿hay sesión activa? (Platzi)
+evdownloader setup          # instala Chromium de Playwright (login manual)
+evd status udemy            # consulta la sesión de Udemy
 evdownloader logout         # cerrar sesión guardada
 evdownloader clear-cache    # borrar la caché de estructura de cursos
 ```
+
+### Diagnóstico de Udemy
+
+`evd status udemy` comprueba la sesión guardada, pero si el navegador automatizado
+no puede cargar la página puede recurrir a una comprobación local de cookies.
+Un estado «sesión activa» no demuestra que el curso esté incluido en tu cuenta.
+Si falla el login manual, prueba `--cookies-from-browser firefox` con Firefox
+Developer Edition y verifica el acceso al curso en el navegador.
+
+Una descarga puede conservar los archivos que sí se completaron y aun así
+terminar con código distinto de cero. El resumen `Download incomplete` cuenta
+fallos de `videos`, `extras`, `resources` y `subtitles`; revisa esas cifras y
+los materiales descargados antes de considerar completo un curso.
 
 ## Arquitectura
 
 | Capa | Módulo | Responsabilidad |
 |---|---|---|
 | CLI | `cli.py` | Comandos `login`, `logout`, `download`, `status`, `clear-cache`, `setup` |
-| Sesión | `session.py`, `browser.py` | Login manual y cookies persistentes (Platzi) |
+| Sesión | `session.py`, `browser.py` | Login manual y cookies persistentes (Platzi y Udemy) |
 | Extractores | `extractors/` | Estructura del curso + resolución de video por plataforma |
 | Descarga | `downloaders/` | `ytdlp` (por defecto) y `native` (rnet + FFmpeg) |
 | Orquestación | `service.py` | Une todo y organiza la salida en carpetas |
 
 Hay **dos patrones de extractor**: navegador (Platzi, intercepta la red con
-Playwright) y delegación en yt-dlp + cookies del navegador (Udemy, Codigofacilito,
-sin navegador automatizado). Añadir una plataforma es escribir un extractor nuevo;
-el núcleo es agnóstico.
+Playwright) y delegación en yt-dlp + cookies (Udemy y Codigofacilito, sin
+navegador automatizado durante la descarga). Añadir una plataforma es escribir
+un extractor nuevo; el núcleo es agnóstico.
 
 ## Aviso legal
 

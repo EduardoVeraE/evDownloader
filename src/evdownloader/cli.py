@@ -19,7 +19,7 @@ from .config import Settings, ensure_dirs
 
 app = typer.Typer(
     name="evdownloader",
-    help="Descargador de cursos de video (Platzi, Udemy, Codigofacilito, SharePoint).",
+    help="Descargador de cursos (Platzi, Udemy, Codigofacilito, SharePoint, LinkedIn Learning).",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -28,10 +28,8 @@ console = Console()
 _PLATFORM_ARG = typer.Argument(
     "platzi", help="Plataforma: platzi | udemy | codigofacilito | sharepoint."
 )
-_LOGIN_PLATFORM_ARG = typer.Argument(
-    "platzi", help="Plataforma: platzi | udemy | codigofacilito."
-)
-_PLATFORMS = ("platzi", "udemy", "codigofacilito", "sharepoint")
+_LOGIN_PLATFORM_ARG = typer.Argument("platzi", help="Plataforma: platzi | udemy | codigofacilito.")
+_PLATFORMS = ("platzi", "udemy", "codigofacilito", "sharepoint", "linkedin")
 _PYPI_URL = "https://pypi.org/pypi/evdownloader/json"
 
 
@@ -127,6 +125,10 @@ def login(platform: str = _LOGIN_PLATFORM_ARG) -> None:
         raise typer.BadParameter(
             "SharePoint solo admite autenticación mediante --cookies-from-browser chrome|edge."
         )
+    if platform.casefold() == "linkedin":
+        raise typer.BadParameter(
+            "LinkedIn Learning usa una sesión existente mediante --cookies-from-browser firefox."
+        )
     ensure_dirs()
     ok = asyncio.run(session.login(platform))
     raise typer.Exit(code=0 if ok else 1)
@@ -170,7 +172,7 @@ def download(
         None,
         "--cookies-from-browser",
         help="Navegador del que leer cookies (chrome, brave, safari...). "
-        "Fallback para Udemy; requerido para Codigofacilito.",
+        "Fallback para Udemy; sesión existente para LinkedIn Learning y Codigofacilito.",
     ),
     sub_langs: str = typer.Option(
         "all", "--sub-langs", help="Idiomas de subtítulos (yt-dlp): all, es,en, es.* ..."
@@ -205,6 +207,7 @@ def download(
     """Descarga un curso completo."""
     ensure_dirs()
     from . import service  # import diferido (carga Playwright/yt-dlp)
+    from .extractors.linkedin import LinkedInLearningError
 
     settings = Settings(
         download_dir=output,
@@ -221,7 +224,11 @@ def download(
         drm_token=drm_token,
         drm_device=drm_device,
     )
-    asyncio.run(service.download_course(url, settings, use_cache=cache))
+    try:
+        asyncio.run(service.download_course(url, settings, use_cache=cache))
+    except (service.DrmPreflightError, LinkedInLearningError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
 
 
 @app.command("clear-cache")
@@ -320,8 +327,7 @@ def status(
     platform: str | None = typer.Argument(
         None,
         help=(
-            "Plataforma: platzi | udemy | codigofacilito | sharepoint. "
-            "Si se omite, muestra todas."
+            "Plataforma: platzi | udemy | codigofacilito | sharepoint. Si se omite, muestra todas."
         ),
     ),
 ) -> None:

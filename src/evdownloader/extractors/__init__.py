@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .base import Extractor
 from .codigofacilito import CodigofacilitoExtractor
+from .linkedin import LinkedInLearningExtractor
 from .platzi import PlatziExtractor
 from .sharepoint import SharePointExtractor
 from .udemy import UdemyExtractor
@@ -18,6 +19,7 @@ _EXTRACTORS: list[type[Extractor]] = [
     UdemyExtractor,
     CodigofacilitoExtractor,
     SharePointExtractor,
+    LinkedInLearningExtractor,
 ]
 _BY_NAME: dict[str, type[Extractor]] = {cls.name: cls for cls in _EXTRACTORS}
 
@@ -42,6 +44,7 @@ def get_extractor_by_name(name: str) -> Extractor:
 __all__ = [
     "CodigofacilitoExtractor",
     "Extractor",
+    "LinkedInLearningExtractor",
     "PlatziExtractor",
     "SharePointExtractor",
     "UdemyExtractor",

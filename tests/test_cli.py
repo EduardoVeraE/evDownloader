@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,6 +23,60 @@ def test_download_cache_is_explicit_opt_in(extra_args: list[str], expected: bool
 
     assert result.exit_code == 0
     assert download_course.await_args.kwargs["use_cache"] is expected
+
+
+def test_download_bad_drm_device_reports_one_safe_line_before_course(tmp_path: Path) -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    extractor = UdemyExtractor()
+    secret = "private-secret"
+    device = tmp_path / f"{secret}.wvd"
+    with (
+        patch("evdownloader.cli.ensure_dirs"),
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch.object(extractor, "list_course", new_callable=AsyncMock) as list_course,
+        patch.object(extractor, "_load_cookies") as load_cookies,
+        patch("evdownloader.service.get_downloader") as get_downloader,
+    ):
+        result = runner.invoke(
+            cli.app,
+            [
+                "download",
+                "https://www.udemy.com/course/test/",
+                "--cookies-from-browser",
+                "firefox",
+                "--use-drm",
+                "--drm-device",
+                str(device),
+                "--output",
+                str(tmp_path / "output"),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert result.exception is not None
+    assert result.output.splitlines() == [
+        "Invalid --drm-device: provide a path to an existing regular .wvd file."
+    ]
+    assert secret not in result.output
+    assert str(device) not in result.output
+    assert "Traceback" not in result.output
+    list_course.assert_not_awaited()
+    load_cookies.assert_not_called()
+    get_downloader.assert_not_called()
+    assert not (tmp_path / "output").exists()
+
+
+def test_download_does_not_mask_unrelated_value_error() -> None:
+    error = ValueError("unrelated failure")
+    with (
+        patch("evdownloader.cli.ensure_dirs"),
+        patch("evdownloader.service.download_course", new=AsyncMock(side_effect=error)),
+    ):
+        result = runner.invoke(cli.app, ["download", "https://example.test/course"])
+
+    assert result.exit_code != 0
+    assert result.exception is error
 
 
 def test_download_help_exposes_cache_opt_in_only() -> None:

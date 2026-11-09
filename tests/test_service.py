@@ -23,6 +23,7 @@ from evdownloader.models import (
 )
 from evdownloader.service import (
     DownloadOutcome,
+    DrmPreflightError,
     UnitOutcome,
     _download_files,
     _download_video,
@@ -72,6 +73,101 @@ async def test_download_course_fetches_fresh_structure_by_default(tmp_path: Path
         await download_course("https://example.test/course", Settings(download_dir=tmp_path))
 
     assert run_download.await_args.kwargs["use_cache"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("device_kind", ["missing", "directory"])
+async def test_invalid_drm_device_fails_before_course_or_browser(
+    tmp_path: Path, device_kind: str
+) -> None:
+    device = tmp_path / "private-token.wvd"
+    if device_kind == "directory":
+        device.mkdir()
+    extractor = MagicMock(needs_browser=True)
+    extractor.name = "test"
+    extractor.list_course = AsyncMock()
+
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader") as get_downloader,
+        patch("evdownloader.service.browser.browser_context") as browser_context,
+        patch("evdownloader.service._run_download", new_callable=AsyncMock) as run_download,
+        pytest.raises(DrmPreflightError, match="Invalid --drm-device") as error,
+    ):
+        await download_course(
+            "https://example.test/course",
+            Settings(download_dir=tmp_path / "output", use_drm=True, drm_device=device),
+        )
+
+    assert str(device) not in str(error.value)
+    assert "private-token" not in str(error.value)
+    extractor.configure.assert_not_called()
+    extractor.list_course.assert_not_awaited()
+    get_downloader.assert_not_called()
+    browser_context.assert_not_called()
+    run_download.assert_not_awaited()
+    assert not (tmp_path / "output").exists()
+    assert list(tmp_path.iterdir()) == ([device] if device_kind == "directory" else [])
+
+
+@pytest.mark.asyncio
+async def test_udemy_drm_without_device_fails_before_cookie_loading(tmp_path: Path) -> None:
+    from evdownloader.extractors.udemy import UdemyExtractor
+
+    extractor = UdemyExtractor()
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch.object(extractor, "_load_cookies") as load_cookies,
+        patch.object(extractor, "list_course", new_callable=AsyncMock) as list_course,
+        patch("evdownloader.service.get_downloader") as get_downloader,
+        pytest.raises(DrmPreflightError, match="Udemy --use-drm requires --drm-device"),
+    ):
+        await download_course(
+            "https://www.udemy.com/course/test/",
+            Settings(download_dir=tmp_path / "output", use_drm=True),
+        )
+
+    load_cookies.assert_not_called()
+    list_course.assert_not_awaited()
+    get_downloader.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "use_drm,device", [(True, True), (False, False), (False, True), (True, False)]
+)
+async def test_valid_and_discovery_drm_preconditions_continue(
+    tmp_path: Path, use_drm: bool, device: bool
+) -> None:
+    from evdownloader.extractors.sharepoint import SharePointExtractor
+
+    device_path = tmp_path / "device.wvd"
+    if device and use_drm:
+        device_path.touch()
+    extractor = SharePointExtractor() if use_drm and not device else MagicMock(needs_browser=False)
+    downloader = MagicMock()
+    settings = Settings(
+        download_dir=tmp_path / "output",
+        use_drm=use_drm,
+        drm_device=device_path if device else None,
+    )
+    with (
+        patch("evdownloader.service.get_extractor", return_value=extractor),
+        patch("evdownloader.service.get_downloader", return_value=downloader),
+        patch(
+            "evdownloader.service._run_download", new=AsyncMock(return_value=DownloadOutcome())
+        ) as run_download,
+    ):
+        await download_course("https://example.test/course", settings)
+
+    if isinstance(extractor, SharePointExtractor):
+        assert extractor._settings is settings
+    else:
+        extractor.configure.assert_called_once_with(settings)
+    run_download.assert_awaited_once_with(
+        extractor, downloader, None, "https://example.test/course", settings, use_cache=False
+    )
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,22 @@ async def _run_drm_refresher(refresher: DrmRefresher) -> DrmInfo | None:
     return await refresher()
 
 
+class _QuietLogger:
+    """Suppress diagnostics that may contain signed URLs or credentials.
+
+    Errors still raise normally; the service reports sanitized exception types.
+    """
+
+    def debug(self, message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        pass
+
+    def error(self, message: str) -> None:
+        pass
+
+
 class YtDlpDownloader(Downloader):
     name = "ytdlp"
     supports_managed_subtitles = True
@@ -73,6 +89,7 @@ class YtDlpDownloader(Downloader):
             "fragment_retries": 5,
             "overwrites": settings.overwrite,
             "quiet": True,
+            "logger": _QuietLogger(),
             "no_warnings": True,
             "noprogress": False,
         }

@@ -20,6 +20,8 @@ CDMs/
 .ruff_cache/
 .pytest_cache/
 .codegraph/
+.atl/
+.playwright-mcp/
 
 # Beads / Dolt files (added by bd init)
 .beads

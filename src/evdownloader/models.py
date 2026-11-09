@@ -43,6 +43,8 @@ class UnitExtras(BaseModel):
     resources: list[Resource] = Field(default_factory=list)
     # Snapshot MHTML de la página (se captura para lectures/quizzes sin video).
     page_mhtml: str | None = None
+    # An attempted optional capture failed; informational, not a fatal download error.
+    page_capture_failed: bool = False
 
 
 class Subtitle(BaseModel):
@@ -50,6 +52,8 @@ class Subtitle(BaseModel):
 
     lang: str = "es"
     url: str
+    # Provider-supplied inline WEBVTT; validated/published like HTTP tracks.
+    content: str | None = Field(default=None, repr=False)
 
 
 class Cookie(BaseModel):

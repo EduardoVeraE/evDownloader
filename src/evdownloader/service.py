@@ -6,24 +6,27 @@ motor de descarga elegido, y organiza la salida en carpetas jerárquicas.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
+import os as os  # Compatibility for callers patching the publication failure seam.
 import re
 import stat
-import tempfile
-from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import unquote, urlsplit
 
-import aiofiles
-import rnet
+import rnet as rnet  # Preserve the legacy injected HTTP client seam.
+from playwright.async_api import BrowserContext
 from rich.console import Console
 
-from . import browser, cache
-from .config import RNET_IMPERSONATE, Settings
+from . import browser, cache, orchestration
+from .artifacts import artifact_path as _artifact_path
+from .artifacts import publish_atomic_text
+from .artifacts import write_text as _write_text
+from .config import Settings
 from .downloaders import get_downloader
+from .downloaders.base import Downloader
 from .extractors import get_extractor
+from .extractors.base import Extractor
 from .extractors.udemy import UdemyExtractor
 from .models import (
     Cookie,
@@ -38,68 +41,57 @@ from .models import (
 )
 from .resource_download import download_resource
 from .resource_download import exception_name as _exception_name
-from .url_policy import URLPolicy, is_credential_header, parse_url_authority
-from .utils import numbered, safe_mkdir, slugify
+from .results import (
+    DownloadOutcome,
+    FailedArtifact,
+    SubtitleFailure,
+    SubtitleSaveReport,
+    UnitOutcome,
+    VideoOutcome,
+)
+from .results import record_failure as _record_failure
+from .subtitle_transfer import MAX_SUBTITLE_BYTES as _MAX_SUBTITLE_BYTES
+from .subtitle_transfer import fetch_subtitle as _fetch_subtitle
+from .subtitle_transfer import subtitle_client as _subtitle_client
+from .utils import safe_mkdir, slugify
 
 console = Console()
+
+
+class DrmPreflightError(ValueError):
+    """Invalid DRM device configuration detected before course processing."""
+
 
 # Extensión "limpia" al final de un nombre (p. ej. ".pdf", ".rar"): distingue un
 # título que ya es un nombre de archivo de uno descriptivo con puntos.
 _CLEAN_EXT_RE = re.compile(r"^\.[a-zA-Z0-9]{1,5}$")
-_MAX_SUBTITLE_BYTES = 10 * 1024 * 1024
 _WEBVTT_LEADING_WHITESPACE = b" \t\r\n"
-_REQUEST_TIMEOUT_S = 30
-_CONNECT_TIMEOUT_S = 10
-_READ_TIMEOUT_S = 30
-_MAX_SUBTITLE_REDIRECTS = 5
 
 
-@dataclass(frozen=True, slots=True)
-class SubtitleFailure:
-    track_index: int
-    lang: str
-    reason: str
-    http_status: int | None = None
-    size: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SubtitleSaveReport:
-    attempted: int
-    expected_paths: tuple[Path, ...]
-    saved_paths: tuple[Path, ...]
-    failures: tuple[SubtitleFailure, ...]
-
-    @property
-    def saved_count(self) -> int:
-        return len(self.saved_paths)
-
-
-@dataclass(frozen=True, slots=True)
-class UnitOutcome:
-    video_failures: int = 0
-    extras_failures: int = 0
-    resource_failures: int = 0
-    subtitle_failures: int = 0
-
-
-@dataclass(slots=True)
-class DownloadOutcome:
-    video_failures: int = 0
-    extras_failures: int = 0
-    resource_failures: int = 0
-    subtitle_failures: int = 0
-
-    def add(self, unit: UnitOutcome) -> None:
-        self.video_failures += unit.video_failures
-        self.extras_failures += unit.extras_failures
-        self.resource_failures += unit.resource_failures
-        self.subtitle_failures += unit.subtitle_failures
+def _print_failed_artifacts(outcome: DownloadOutcome) -> None:
+    if outcome.failed_artifacts:
+        console.print("[bold yellow]Archivos y recursos no descargados:[/bold yellow]")
+        for failure in outcome.failed_artifacts:
+            console.print(f"  - {failure.artifact}: {failure.reason}", markup=False)
 
 
 async def download_course(url: str, settings: Settings, *, use_cache: bool = False) -> None:
     """Descarga un curso completo a ``settings.download_dir``."""
     extractor = get_extractor(url)
+    if settings.use_drm:
+        if settings.drm_device is not None:
+            try:
+                valid_device = settings.drm_device.is_file()
+            except OSError:
+                valid_device = False
+            if not valid_device:
+                raise DrmPreflightError(
+                    "Invalid --drm-device: provide a path to an existing regular .wvd file."
+                )
+        elif isinstance(extractor, UdemyExtractor):
+            raise DrmPreflightError(
+                "Udemy --use-drm requires --drm-device with a regular .wvd file."
+            )
     extractor.configure(settings)
     downloader = get_downloader(settings.downloader)
 
@@ -116,61 +108,37 @@ async def download_course(url: str, settings: Settings, *, use_cache: bool = Fal
             extractor, downloader, None, url, settings, use_cache=use_cache
         )
 
-    if any(
-        (
-            outcome.video_failures,
-            outcome.extras_failures,
-            outcome.resource_failures,
-            outcome.subtitle_failures,
-        )
-    ):
-        summary = (
-            f"videos={outcome.video_failures}, extras={outcome.extras_failures}, "
-            f"resources={outcome.resource_failures}, subtitles={outcome.subtitle_failures}"
-        )
+    if outcome.incomplete:
+        summary = outcome.summary
         console.print(f"[bold red]Download incomplete: {summary}.[/bold red]")
+        _print_failed_artifacts(outcome)
         raise RuntimeError(f"Download incomplete: {summary}.")
     console.print("[bold green]Descarga finalizada.[/bold green]")
+    _print_failed_artifacts(outcome)
 
 
 async def _run_download(
-    extractor, downloader, ctx, url: str, settings: Settings, *, use_cache: bool
+    extractor: Extractor,
+    downloader: Downloader,
+    ctx: BrowserContext | None,
+    url: str,
+    settings: Settings,
+    *,
+    use_cache: bool,
 ) -> DownloadOutcome:
     course = await _load_structure(extractor, ctx, url, use_cache=use_cache)
-    console.print(
-        f"[bold cyan]{course.title}[/bold cyan] — "
-        f"{sum(len(c.units) for c in course.chapters)} unidades en "
-        f"{len(course.chapters)} capítulos"
+    return await orchestration.run_course(
+        course,
+        extractor.name,
+        settings,
+        partial(_process_unit, extractor, downloader, ctx),
+        console,
     )
 
-    # Organizar por plataforma: <download_dir>/<Plataforma>/<curso>.
-    platform_dir = extractor.name.capitalize()
-    course_dir = safe_mkdir(settings.download_dir / platform_dir / slugify(course.title))
 
-    downloaded = 0
-    outcome = DownloadOutcome()
-    for chapter in course.chapters:
-        chapter_dir = safe_mkdir(course_dir / numbered(chapter.index, chapter.title))
-        for unit in chapter.units:
-            if (
-                unit.type is UnitType.VIDEO
-                and settings.limit is not None
-                and downloaded >= settings.limit
-            ):
-                console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
-                return outcome
-            outcome.add(
-                await _process_unit(extractor, downloader, ctx, unit, chapter_dir, settings)
-            )
-            if unit.type is UnitType.VIDEO:
-                downloaded += 1
-                if settings.limit is not None and downloaded >= settings.limit:
-                    console.print(f"[dim]Límite de {settings.limit} clases alcanzado.[/dim]")
-                    return outcome
-    return outcome
-
-
-async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Course:
+async def _load_structure(
+    extractor: Extractor, ctx: BrowserContext | None, url: str, *, use_cache: bool
+) -> Course:
     cache_url = _structure_cache_key(extractor, url)
     if use_cache:
         cached = cache.get(cache_url)
@@ -189,7 +157,7 @@ async def _load_structure(extractor, ctx, url: str, *, use_cache: bool) -> Cours
     return course
 
 
-def _structure_cache_key(extractor, url: str) -> str:
+def _structure_cache_key(extractor: Extractor, url: str) -> str:
     revision = getattr(type(extractor), "structure_cache_revision", None)
     if not isinstance(revision, str) or not revision:
         return url
@@ -197,33 +165,35 @@ def _structure_cache_key(extractor, url: str) -> str:
 
 
 async def _process_unit(
-    extractor, downloader, ctx, unit: Unit, out_dir: Path, settings: Settings
+    extractor: Extractor,
+    downloader: Downloader,
+    ctx: BrowserContext | None,
+    unit: Unit,
+    out_dir: Path,
+    settings: Settings,
 ) -> UnitOutcome:
-    base = out_dir / numbered(unit.index, unit.title)
-    video_failures = 0
-    subtitle_failures = 0
-    if unit.type == UnitType.VIDEO:
-        video_ok, subtitles_ok = await _download_video(
-            extractor, downloader, ctx, unit, base, settings
-        )
-        video_failures = int(not video_ok)
-        subtitle_failures = int(video_ok and not subtitles_ok)
-    else:
-        console.print(f"[dim]{unit.type.value}: {unit.title}[/dim]")
-    extras_failures = 0
-    resource_failures = 0
-    if settings.resources:
-        try:
-            resource_failures = await _save_extras(extractor, ctx, unit, base, settings)
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]✗ Extras failed ({_exception_name(exc)}).[/red]")
-            extras_failures = 1
-    return UnitOutcome(video_failures, extras_failures, resource_failures, subtitle_failures)
+    return await orchestration.process_unit(
+        unit,
+        out_dir,
+        settings,
+        video=partial(_download_video, extractor, downloader, ctx),
+        extras=partial(_save_extras, extractor, ctx),
+        record_failure=_record_failure,
+        console=console,
+    )
 
 
 async def _download_video(
-    extractor, downloader, ctx, unit: Unit, base: Path, settings: Settings
-) -> tuple[bool, bool]:
+    extractor: Extractor,
+    downloader: Downloader,
+    ctx: BrowserContext | None,
+    unit: Unit,
+    base: Path,
+    settings: Settings,
+    *,
+    failed_artifacts: list[FailedArtifact] | None = None,
+) -> VideoOutcome:
+    label = f"Unidad {unit.index} — {unit.title}"
     canonical_video = _artifact_path(base, ".mp4")
     legacy_video = base.with_suffix(".mp4")
     existing_video = canonical_video if canonical_video.exists() else None
@@ -244,7 +214,7 @@ async def _download_video(
     ):
         assert existing_video is not None
         console.print(f"[dim]Ya existe: {existing_video.name}[/dim]")
-        return True, True
+        return VideoOutcome(True, True)
     prior_paths = prior_manifest[1] if prior_manifest is not None else ()
 
     try:
@@ -254,7 +224,10 @@ async def _download_video(
             f"[red]✗ No se pudo preparar subtítulos para {unit.title} "
             f"({_exception_name(exc)}).[/red]"
         )
-        return recovering, False
+        _record_failure(
+            failed_artifacts, f"{label} / preparación de subtítulos", _exception_name(exc)
+        )
+        return VideoOutcome(recovering, False)
 
     action = "Recuperando subtítulos" if recovering else "Resolviendo"
     console.print(f"[cyan]{action}:[/cyan] {unit.title}")
@@ -262,14 +235,22 @@ async def _download_video(
         source = await extractor.resolve_video(ctx, unit)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗ No se pudo resolver {unit.title} ({_exception_name(exc)}).[/red]")
-        return recovering, False
+        _record_failure(failed_artifacts, f"{label} / resolución de fuente", _exception_name(exc))
+        return VideoOutcome(recovering, False)
     if source is None:
         console.print(f"[red]Sin fuente de video para:[/red] {unit.title}")
-        return recovering, False
+        _record_failure(failed_artifacts, f"{label} / fuente", "missing_video_source")
+        return VideoOutcome(recovering, False)
 
     if recovering:
         complete, paths, failures = await _collect_source_subtitles(
-            downloader, source, base, settings, recover_managed=True
+            downloader,
+            source,
+            base,
+            settings,
+            recover_managed=True,
+            failed_artifacts=failed_artifacts,
+            label=label,
         )
     else:
         try:
@@ -279,15 +260,29 @@ async def _download_video(
             console.print(
                 f"[red]✗ Falló la descarga de {unit.title} ({_exception_name(exc)}).[/red]"
             )
-            return False, False
+            _record_failure(failed_artifacts, f"{label} / video", _exception_name(exc))
+            return VideoOutcome(False, False)
         complete, paths, failures = await _collect_source_subtitles(
-            downloader, source, base, settings, recover_managed=False
+            downloader,
+            source,
+            base,
+            settings,
+            recover_managed=False,
+            failed_artifacts=failed_artifacts,
+            label=label,
         )
 
     if recovering:
         paths = _stable_path_union(prior_paths, paths)
     if any(not _valid_webvtt(path) for path in paths):
         complete = False
+        for path in paths:
+            if not _valid_webvtt(path) and path not in _subtitle_output_paths(
+                source.subtitles, base
+            ):
+                _record_failure(
+                    failed_artifacts, f"{label} / {path.name}", "missing_or_invalid_webvtt"
+                )
         if "invalid_managed_subtitle" not in failures:
             failures = (*failures, "missing_or_invalid_webvtt")
 
@@ -295,6 +290,9 @@ async def _download_video(
         _write_subtitle_manifest(base, complete=complete, paths=paths)
     except OSError as exc:
         failures = (*failures, _exception_name(exc))
+        _record_failure(
+            failed_artifacts, f"{label} / manifiesto de subtítulos", _exception_name(exc)
+        )
         complete = False
 
     if complete:
@@ -303,16 +301,18 @@ async def _download_video(
     else:
         detail = ", ".join(failures) if failures else "estado incompleto"
         console.print(f"[yellow]Subtítulos incompletos:[/yellow] {detail}")
-    return True, complete
+    return VideoOutcome(True, complete)
 
 
 async def _collect_source_subtitles(
-    downloader,
+    downloader: Downloader,
     source: VideoSource,
     base: Path,
     settings: Settings,
     *,
     recover_managed: bool,
+    failed_artifacts: list[FailedArtifact] | None = None,
+    label: str = "Subtítulos",
 ) -> tuple[bool, tuple[Path, ...], tuple[str, ...]]:
     complete = True
     paths: tuple[Path, ...] = ()
@@ -344,6 +344,9 @@ async def _collect_source_subtitles(
                     complete = False
                     failures.append("invalid_managed_subtitle")
 
+    for reason in failures:
+        _record_failure(failed_artifacts, f"{label} / subtítulos gestionados", reason)
+
     if source.subtitles:
         expected_paths = _subtitle_output_paths(source.subtitles, base)
         try:
@@ -351,17 +354,39 @@ async def _collect_source_subtitles(
         except Exception as exc:  # noqa: BLE001
             complete = False
             failures.append(_exception_name(exc))
+            for index, _ in enumerate(source.subtitles, 1):
+                _record_failure(
+                    failed_artifacts, f"{label} / subtítulo {index}", _exception_name(exc)
+                )
         else:
             if report.failures:
                 complete = False
                 failures.extend(_subtitle_failure_label(failure) for failure in report.failures)
+                for failure in report.failures:
+                    reason = failure.reason
+                    if failure.http_status is not None:
+                        reason += f" (HTTP {failure.http_status})"
+                    _record_failure(
+                        failed_artifacts,
+                        f"{label} / subtítulo {failure.track_index + 1} ({failure.lang})",
+                        reason,
+                    )
         paths = tuple(dict.fromkeys((*paths, *expected_paths)))
     elif not source.write_subs and not source.subtitle_inventory_confirmed:
         complete = False
+        _record_failure(
+            failed_artifacts, f"{label} / inventario de subtítulos", "subtitle_inventory_unknown"
+        )
 
     if source.subtitle_inventory_required and not source.subtitle_inventory_confirmed:
         complete = False
         failures.append("subtitle_inventory_unknown")
+        if source.write_subs or source.subtitles:
+            _record_failure(
+                failed_artifacts,
+                f"{label} / inventario de subtítulos",
+                "subtitle_inventory_unknown",
+            )
 
     return complete, paths, tuple(failures)
 
@@ -374,10 +399,6 @@ def _subtitle_failure_label(failure: SubtitleFailure) -> str:
 
 def _subtitle_manifest_path(base: Path) -> Path:
     return _artifact_path(base, ".subtitles.json")
-
-
-def _artifact_path(base: Path, suffix: str) -> Path:
-    return base.parent / f"{base.name}{suffix}"
 
 
 def _is_subtitle_basename(base: Path, name: str) -> bool:
@@ -426,24 +447,7 @@ def _write_subtitle_manifest(base: Path, *, complete: bool, paths: tuple[Path, .
     manifest_path = _subtitle_manifest_path(base)
     names = [path.name for path in paths if _is_subtitle_basename(base, path.name)]
     payload = {"version": 1, "complete": complete, "files": names}
-    temporary_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=manifest_path.parent,
-            prefix=f".{manifest_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary_name = temporary.name
-            json.dump(payload, temporary, separators=(",", ":"))
-            temporary.write("\n")
-        os.replace(temporary_name, manifest_path)
-    finally:
-        if temporary_name is not None:
-            with contextlib.suppress(OSError):
-                Path(temporary_name).unlink()
+    publish_atomic_text(manifest_path, json.dumps(payload, separators=(",", ":")) + "\n")
 
 
 def _discover_subtitle_paths(base: Path) -> tuple[tuple[Path, ...], bool]:
@@ -509,33 +513,72 @@ def _subtitle_output_paths(subtitles: list[Subtitle], base: Path) -> tuple[Path,
     return tuple(paths)
 
 
-async def _save_extras(extractor, ctx, unit: Unit, base: Path, settings: Settings) -> int:
+async def _save_extras(
+    extractor: Extractor,
+    ctx: BrowserContext | None,
+    unit: Unit,
+    base: Path,
+    settings: Settings,
+    *,
+    failed_artifacts: list[FailedArtifact] | None = None,
+) -> int:
     """Guarda resumen, archivos adjuntos, enlaces y, si aplica, el MHTML."""
     # Para lectures/quizzes (sin video) capturamos la página completa como MHTML.
     capture = unit.type is not UnitType.VIDEO
     extras: UnitExtras = await extractor.resolve_extras(ctx, unit, capture_page=capture)
-
-    if extras.summary_html:
-        await _write_text(
-            _artifact_path(base, ".resumen.html"), _wrap_html(unit.title, extras.summary_html)
+    if extras.page_capture_failed:
+        _record_failure(
+            failed_artifacts,
+            f"Unidad {unit.index} — {unit.title} / .mhtml",
+            "page_capture_failed_or_unavailable",
         )
 
+    async def write_extra(suffix: str, content: str) -> None:
+        try:
+            await _write_text(_artifact_path(base, suffix), content)
+        except Exception as exc:  # noqa: BLE001
+            _record_failure(
+                failed_artifacts,
+                f"Unidad {unit.index} — {unit.title} / {suffix}",
+                _exception_name(exc),
+            )
+            raise
+
+    if extras.summary_html:
+        await write_extra(".resumen.html", _wrap_html(unit.title, extras.summary_html))
+
     if extras.page_mhtml:
-        await _write_text(_artifact_path(base, ".mhtml"), extras.page_mhtml)
+        await write_extra(".mhtml", extras.page_mhtml)
 
     files = [r for r in extras.resources if r.kind is ResourceKind.FILE]
     links = [r for r in extras.resources if r.kind is ResourceKind.LINK]
 
     if links:
         body = "\n".join(f"- [{lk.title}]({lk.url})" for lk in links)
-        await _write_text(
-            _artifact_path(base, ".enlaces.md"), f"# Enlaces — {unit.title}\n\n{body}\n"
-        )
+        await write_extra(".enlaces.md", f"# Enlaces — {unit.title}\n\n{body}\n")
 
     if files:
-        cookies = browser.cookies_as_records(await ctx.cookies()) if ctx is not None else []
-        res_dir = safe_mkdir(_artifact_path(base, "-recursos"))
-        return await _download_files(files, res_dir, cookies, extractor.resource_host_suffixes)
+        try:
+            cookies = browser.cookies_as_records(await ctx.cookies()) if ctx is not None else []
+            res_dir = safe_mkdir(_artifact_path(base, "-recursos"))
+        except Exception as exc:  # noqa: BLE001
+            for index, resource in enumerate(files, 1):
+                _record_failure(
+                    failed_artifacts,
+                    f"Unidad {unit.index} — {unit.title} / adjunto {index} — {resource.title}",
+                    _exception_name(exc),
+                )
+            raise
+        if failed_artifacts is None:
+            return await _download_files(files, res_dir, cookies, extractor.resource_host_suffixes)
+        return await _download_files(
+            files,
+            res_dir,
+            cookies,
+            extractor.resource_host_suffixes,
+            failed_artifacts=failed_artifacts,
+            label=f"Unidad {unit.index} — {unit.title}",
+        )
     return 0
 
 
@@ -548,10 +591,20 @@ async def _save_subtitles(
     client = _subtitle_client()
     saved_paths: list[Path] = []
     failures: list[SubtitleFailure] = []
+    data: bytes | None
+    status_code: int | None
     for track_index, (sub, sub_path) in enumerate(zip(subtitles, expected_paths, strict=True)):
-        data, status_code, declared_header, request_failure = await _fetch_subtitle(
-            client, sub.url, source
-        )
+        if sub.content is not None:
+            data, status_code, declared_header, request_failure = (
+                sub.content.encode("utf-8"),
+                200,
+                None,
+                None,
+            )
+        else:
+            data, status_code, declared_header, request_failure = await _fetch_subtitle(
+                client, sub.url, source
+            )
         if request_failure:
             failure_size = None
             if request_failure == "declared_too_large" and declared_header is not None:
@@ -617,19 +670,8 @@ async def _save_subtitles(
             )
             continue
 
-        temporary_name: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=sub_path.parent,
-                prefix=f".{sub_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary:
-                temporary_name = temporary.name
-                temporary.write(content)
-            os.replace(temporary_name, sub_path)
+            publish_atomic_text(sub_path, content)
         except OSError:
             failures.append(
                 SubtitleFailure(
@@ -637,10 +679,6 @@ async def _save_subtitles(
                 )
             )
             continue
-        finally:
-            if temporary_name is not None:
-                with contextlib.suppress(OSError):
-                    Path(temporary_name).unlink()
         saved_paths.append(sub_path)
 
     return SubtitleSaveReport(
@@ -651,81 +689,19 @@ async def _save_subtitles(
     )
 
 
-async def _fetch_subtitle(
-    client: object, url: str, source: VideoSource
-) -> tuple[bytes | None, int | None, str | None, str | None]:
-    """Fetch one subtitle through trusted redirects and close every response once."""
-    authority = parse_url_authority(url)
-    suffixes = source.trusted_host_suffixes or (
-        (authority.hostname,) if authority is not None else ()
-    )
-    policy = URLPolicy("media", suffixes)
-    current_url = url
-    visited: set[str] = set()
-    for hop in range(_MAX_SUBTITLE_REDIRECTS + 1):
-        if not policy.allows(current_url):
-            return None, None, None, "untrusted_host"
-        if current_url in visited:
-            return None, None, None, "redirect_loop"
-        visited.add(current_url)
-        headers = {
-            key: value
-            for key, value in source.http_headers.items()
-            if not is_credential_header(key)
-        }
-        cookie_header = browser.cookie_header_for_url(
-            source.cookie_jar,
-            current_url,
-            trusted_host_suffixes=source.trusted_host_suffixes,
-        )
-        if cookie_header:
-            headers["Cookie"] = cookie_header
-        try:
-            response = await client.get(current_url, headers=headers, allow_redirects=False)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            return None, None, None, "network_error"
-        try:
-            status = response.status_code
-            status_code = status.as_int()
-            if status_code in {301, 302, 303, 307, 308}:
-                location = response.headers.get("location")
-                if not isinstance(location, str) or not location or hop == _MAX_SUBTITLE_REDIRECTS:
-                    return None, status_code, None, "invalid_redirect"
-                current_url = urljoin(current_url, location)
-                continue
-            if not status.is_success():
-                return None, status_code, None, "http_status"
-            try:
-                declared_header = response.headers.get("content-length")
-                if isinstance(declared_header, str):
-                    try:
-                        if int(declared_header) > _MAX_SUBTITLE_BYTES:
-                            return None, status_code, declared_header, "declared_too_large"
-                    except ValueError:
-                        pass
-                return (
-                    await response.bytes(),
-                    status_code,
-                    declared_header if isinstance(declared_header, str) else None,
-                    None,
-                )
-            except Exception:  # noqa: BLE001
-                return None, status_code, None, "read_error"
-        finally:
-            with contextlib.suppress(Exception):
-                await response.close()
-    return None, None, None, "redirect_limit"
-
-
 async def _download_files(
     files: list[Resource],
     out_dir: Path,
     cookies: list[Cookie],
     trusted_host_suffixes: tuple[str, ...],
+    *,
+    failed_artifacts: list[FailedArtifact] | None = None,
+    label: str = "Recursos",
 ) -> int:
     """Descarga adjuntos sin revelar URLs firmadas ni credenciales en errores."""
     failures = 0
-    for res in files:
+    for index, res in enumerate(files, 1):
+        artifact = f"{label} / adjunto {index} — {res.title}"
         name = _filename_from_url(res.url, res.title)
         try:
             result = await download_resource(
@@ -736,6 +712,7 @@ async def _download_files(
             )
         except Exception as exc:  # noqa: BLE001
             failures += 1
+            _record_failure(failed_artifacts, artifact, _exception_name(exc))
             console.print(f"  [red]·[/red] resource failed ({_exception_name(exc)})")
             continue
         if result.ok:
@@ -743,17 +720,12 @@ async def _download_files(
         else:
             failures += 1
             error = f" ({result.error_name})" if result.error_name else ""
+            reason = result.reason or "resource_failed"
+            if isinstance(result.http_status, int):
+                reason += f" (HTTP {result.http_status})"
+            _record_failure(failed_artifacts, artifact, reason + error)
             console.print(f"  [red]·[/red] falló recurso: {result.reason}{error}")
     return failures
-
-
-def _subtitle_client():
-    return rnet.Client(
-        impersonate=getattr(rnet.Impersonate, RNET_IMPERSONATE, None),
-        timeout=_REQUEST_TIMEOUT_S,
-        connect_timeout=_CONNECT_TIMEOUT_S,
-        read_timeout=_READ_TIMEOUT_S,
-    )
 
 
 def _filename_from_url(url: str, title: str) -> str:
@@ -768,11 +740,6 @@ def _filename_from_url(url: str, title: str) -> str:
     if candidate and "." in candidate:
         return slugify(candidate)
     return slugify(title)
-
-
-async def _write_text(path: Path, content: str) -> None:
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        await f.write(content)
 
 
 def _wrap_html(title: str, body_html: str) -> str:
